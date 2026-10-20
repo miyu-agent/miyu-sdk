@@ -1,0 +1,21 @@
+[package]
+protocol = [1, 1]
+name = { en = "Hello", zh = "打招呼" }
+summary = { en = "Greets people: an example written with miyu_ext", zh = "打招呼：用 miyu_ext 写的例子" }
+
+[command]
+name = "hello"
+program = "miyu-hello"
+about = { en = "Hello extension", zh = "打招呼扩展" }
+
+[process]
+args = ["serve"]
+capabilities = ["tools"]
+
+[settings.greeting]
+type = "text"
+max = 40
+default = "Hello"
+layers = ["system"]
+applies = "now"
+name = { en = "Greeting", zh = "问候语" }
