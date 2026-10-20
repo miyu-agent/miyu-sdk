@@ -1,0 +1,5 @@
+# Pinned like the core and the other packages: every clippy release adds checks, so drifting turns CI red untouched.
+[toolchain]
+channel = "1.97.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

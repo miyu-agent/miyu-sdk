@@ -1,6 +1,6 @@
 # Miyu 开发包
 
-写 Miyu 扩展用的两个小库：Python（`python/miyu_ext.py`）、Rust（`rust/`，在做）。英文版：[README.en.md](README.en.md)。
+写 Miyu 扩展用的两个小库：Python（`python/miyu_ext.py`）、Rust（`rust/`，crate `miyu-ext`）。两份的概念、名字一一对应。英文版：[README.en.md](README.en.md)。
 
 扩展能做什么由协议定（核心仓库的 `docs/reference/extensions.md`），开发包不多给本事；它把每个扩展都要写一遍的那部分包起来：握手、一行一条的收发、几个调用同时来时照编号对着回、取消、配置推送、标准输入读到头就退、退出码 1 的规矩。
 
@@ -59,6 +59,30 @@ core.close()
 ```
 
 这个仓库自己的测试：`python3 -m unittest discover -s python/tests`。
+
+## Rust
+
+crate `miyu-ext`：同步、只依赖 `serde_json`。处理函数里经 `call.core()`（命令、方法、别的处理函数直接收 `&Core`）调核心的方法、读配置，对应 Python 的 `ext.call`、`ext.config`。
+
+```rust
+use miyu_ext::{Extension, Reply, Tool};
+use serde_json::{Value, json};
+
+let mut ext = Extension::new("hello", "0.1.0");
+ext.tool(
+    Tool::new("hello_greet", "Greet someone by name.")
+        .schema(json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}))
+        .subject("name"),
+    |args, call| {
+        let config = call.core().config();
+        let greeting = config.get("hello.greeting").and_then(Value::as_str).unwrap_or("Hello");
+        Reply::text(format!("{greeting}, {}!", args["name"].as_str().unwrap_or("there")))
+    },
+);
+ext.run();
+```
+
+完整的例子：`rust/examples/hello.rs`（`cargo build --example hello`，程序放进包的 `bin/`，叫 `miyu-hello`，Windows 上是 `miyu-hello.exe`）。`FakeCore::start(ext, config)` 同 Python 的假核心；测试：在 `rust/` 下 `cargo test`。
 
 ## 许可证
 

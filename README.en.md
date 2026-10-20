@@ -1,6 +1,6 @@
 # Miyu SDK
 
-Two small libraries for writing Miyu extensions: Python (`python/miyu_ext.py`) and Rust (`rust/`, in progress). The Chinese [README.md](README.md) is the original.
+Two small libraries for writing Miyu extensions: Python (`python/miyu_ext.py`) and Rust (`rust/`, crate `miyu-ext`), with the same concepts and names. The Chinese [README.md](README.md) is the original.
 
 What an extension can do is set by the protocol (`docs/reference/extensions.en.md` in the core repository); the SDK adds nothing on top. It wraps what every extension would otherwise write again: the handshake, line-by-line messages, answering concurrent calls by id, cancelling, config pushes, exiting when stdin ends, and the exit code 1 rule.
 
@@ -59,6 +59,30 @@ core.close()
 ```
 
 This repository's own tests: `python3 -m unittest discover -s python/tests`.
+
+## Rust
+
+Crate `miyu-ext`: synchronous, depends only on `serde_json`. Handlers call core methods and read config through `call.core()` (commands, methods and other handlers get `&Core` directly), like Python's `ext.call` and `ext.config`.
+
+```rust
+use miyu_ext::{Extension, Reply, Tool};
+use serde_json::{Value, json};
+
+let mut ext = Extension::new("hello", "0.1.0");
+ext.tool(
+    Tool::new("hello_greet", "Greet someone by name.")
+        .schema(json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}))
+        .subject("name"),
+    |args, call| {
+        let config = call.core().config();
+        let greeting = config.get("hello.greeting").and_then(Value::as_str).unwrap_or("Hello");
+        Reply::text(format!("{greeting}, {}!", args["name"].as_str().unwrap_or("there")))
+    },
+);
+ext.run();
+```
+
+The full example is `rust/examples/hello.rs` (`cargo build --example hello`; put the binary in the package's `bin/` as `miyu-hello`, `miyu-hello.exe` on Windows). `FakeCore::start(ext, config)` works like the Python fake core; tests: `cargo test` in `rust/`.
 
 ## License
 
