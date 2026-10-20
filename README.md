@@ -39,6 +39,7 @@ if __name__ == "__main__":
 | 写什么 | 做什么 |
 |---|---|
 | `@ext.tool(name, description, schema, access=…)` | 一件工具：函数收 `(args, call)`，交回字、`Reply` 或者完整的回答。`call.cancelled` 是超时、人打断了没有 |
+| `Reply(text, error, data, detail, sent, end_turn)` | 完整的回答：`data` 只给 AI 在命令里用 `miyu call` 调到它的脚本（一行 JSON），`detail` 只给头画卡片，`sent` 是她发出去的图，`end_turn` 这一轮到此为止 |
 | `@ext.command(name)` | 清单 `[[slash]]` 里的一条斜杠命令：交回给人看的那段话 |
 | `@ext.method(name)` | 后台页、界面块的按钮、别的包调的方法：函数收 `(params, caller)` |
 | `@ext.on(method)` | 别的反向调用、推送：`user.append`、`search.query`、`widget.watch`…… |

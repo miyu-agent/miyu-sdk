@@ -39,6 +39,7 @@ The full example is in `python/examples/hello/`; the manifest is described in `d
 | Write | Does |
 |---|---|
 | `@ext.tool(name, description, schema, access=…)` | A tool: the function gets `(args, call)` and returns text, a `Reply` or a full answer. `call.cancelled` says whether it timed out or the person interrupted |
+| `Reply(text, error, data, detail, sent, end_turn)` | A full answer: `data` goes only to scripts that call the tool with `miyu call` (one line of JSON), `detail` only to heads for cards, `sent` are images she sends, `end_turn` ends the turn here |
 | `@ext.command(name)` | A slash command from the manifest's `[[slash]]`: return the text shown to the person |
 | `@ext.method(name)` | A method called by your page, a widget button or another package: the function gets `(params, caller)` |
 | `@ext.on(method)` | Other calls and pushes from the core: `user.append`, `search.query`, `widget.watch`… |
