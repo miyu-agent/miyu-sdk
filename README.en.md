@@ -36,6 +36,8 @@ if __name__ == "__main__":
 
 The full example is in `python/examples/hello/`; the manifest is described in `docs/authors/manifest.en.md` in the core repository.
 
+One file for all three platforms: Linux and macOS start it by its `#!` line (the program needs execute permission); on Windows the core reads the `#!` line to find the interpreter, and `python3` means `python` (core 0.8.0 on). Miyu doesn't ship Python: say in your package's description that it needs Python 3.9 or later.
+
 | Write | Does |
 |---|---|
 | `@ext.tool(name, description, schema, access=…)` | A tool: the function gets `(args, call)` and returns text, a `Reply` or a full answer. `call.cancelled` says whether it timed out or the person interrupted |

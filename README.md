@@ -36,6 +36,8 @@ if __name__ == "__main__":
 
 完整的例子在 `python/examples/hello/`，清单怎么写见核心仓库的 `docs/authors/manifest.md`。
 
+三个平台一份文件：Linux、macOS 上照 `#!` 直接起（程序要有可执行权限）；Windows 上核心照 `#!` 找解释器，`python3` 找的是 `python`（核心 0.8.0 起）。Miyu 不带 Python：请在包的说明里写上要装 Python 3.9 以上。
+
 | 写什么 | 做什么 |
 |---|---|
 | `@ext.tool(name, description, schema, access=…)` | 一件工具：函数收 `(args, call)`，交回字、`Reply` 或者完整的回答。`call.cancelled` 是超时、人打断了没有 |
