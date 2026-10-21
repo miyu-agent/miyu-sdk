@@ -87,6 +87,15 @@ ext.run();
 
 The full example is `rust/examples/hello.rs` (`cargo build --example hello`; put the binary in the package's `bin/` as `miyu-hello`, `miyu-hello.exe` on Windows). `FakeCore::start(ext, config)` works like the Python fake core; tests: `cargo test` in `rust/`.
 
+## Versions
+
+The current version is v0.1.0. Each release gets a `vX.Y.Z` tag, with `__version__` in `python/miyu_ext.py` and the version in `rust/Cargo.toml` updated to match; a tag is made only after both kits pass their tests on all three platforms (`.github/workflows/ci.yml`). For Rust, depend on the tag:
+
+```toml
+[dependencies]
+miyu-ext = { git = "https://github.com/miyu-agent/miyu-sdk", tag = "v0.1.0" }
+```
+
 ## License
 
 MIT, see `LICENSE`.

@@ -87,6 +87,15 @@ ext.run();
 
 完整的例子：`rust/examples/hello.rs`（`cargo build --example hello`，程序放进包的 `bin/`，叫 `miyu-hello`，Windows 上是 `miyu-hello.exe`）。`FakeCore::start(ext, config)` 同 Python 的假核心；测试：在 `rust/` 下 `cargo test`。
 
+## 版本
+
+现在是 v0.1.0。发版打 `vX.Y.Z` 标签，`python/miyu_ext.py` 的 `__version__`、`rust/Cargo.toml` 的版本跟着改；两份在三个平台上的测试（`.github/workflows/ci.yml`）过了才打。Rust 照标签依赖：
+
+```toml
+[dependencies]
+miyu-ext = { git = "https://github.com/miyu-agent/miyu-sdk", tag = "v0.1.0" }
+```
+
 ## 许可证
 
 MIT，见 `LICENSE`。
