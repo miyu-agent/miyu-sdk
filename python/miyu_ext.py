@@ -2,7 +2,7 @@
 are handled here, so an extension is a few decorated functions.
 
 One file, standard library only, Python 3.9 or newer. Copy it next to your program in the package's `bin/` folder, or
-install it with pip. MIT licensed. The protocol itself is in Miyu's `docs/reference/extensions.md`.
+install it with pip. Apache-2.0 licensed. The protocol itself is in Miyu's `docs/reference/extensions.md`.
 
     from miyu_ext import Extension
 

@@ -98,4 +98,4 @@ miyu-ext = { git = "https://github.com/miyu-agent/miyu-sdk", tag = "v0.1.0" }
 
 ## 许可证
 
-MIT，见 `LICENSE`。
+Apache-2.0，见 `LICENSE`（2026-10-26 起，以前是 MIT）。照着写的扩展用什么许可证都行：它们只经协议和 Miyu 说话，是独立的作品，Miyu 核心的 AGPL 管不到它们。

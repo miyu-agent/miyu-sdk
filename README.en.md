@@ -98,4 +98,4 @@ miyu-ext = { git = "https://github.com/miyu-agent/miyu-sdk", tag = "v0.1.0" }
 
 ## License
 
-MIT, see `LICENSE`.
+Apache-2.0, see `LICENSE` (since 2026-10-26; MIT before). Extensions you write with it can use any license: they only talk to Miyu over its protocol, so they are separate works and the core's AGPL does not reach them.

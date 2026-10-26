@@ -1,5 +1,5 @@
 //! Write a Miyu extension in Rust: the handshake, line-by-line JSON-RPC, concurrent calls, cancelling and config pushes are
-//! handled here, so an extension is a few registered closures. Synchronous, threads only, `serde_json` only; MIT licensed.
+//! handled here, so an extension is a few registered closures. Synchronous, threads only, `serde_json` only; Apache-2.0 licensed.
 //! The protocol itself is in Miyu's `docs/reference/extensions.md`. The Python `miyu_ext.py` has the same concepts and names.
 //!
 //! ```no_run

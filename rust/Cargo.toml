@@ -3,7 +3,7 @@ name = "miyu-ext"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
-license = "MIT"
+license = "Apache-2.0"
 description = "Write a Miyu extension in Rust: handshake, line-by-line JSON-RPC, concurrent calls, cancelling and config pushes."
 publish = false
 
