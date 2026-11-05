@@ -1,6 +1,8 @@
-//! What handlers get and give back: [`Tool`] (a tool's spec), [`Call`] (one `tool.call`), [`Reply`] (its result),
-//! [`Core`] (calling the core, reading config) and [`CoreError`] (a refusal).
+//! What handlers get and give back: [`Tool`] (a tool's spec), [`Call`] (one `tool.call`), [`Reply`] (its result, with
+//! [`Change`] for a checked file change), [`Channel`] (`miyu call` for the commands a tool runs), [`Core`] (calling the core,
+//! reading config) and [`CoreError`] (a refusal).
 
+use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -79,11 +81,49 @@ impl Tool {
     pub fn feature(self, feature: &str) -> Tool {
         self.set("feature", json!(feature))
     }
+
+    /// Which parameters are file paths: `[{"parameter": "file_path", "write": true}]` (top-level string or string-array
+    /// parameters; `write` needs `write` access). The core checks them like the built-in `edit`, hands the allowed
+    /// locations over as [`Call::checked`], and only then keeps the file effects you report.
+    pub fn paths(self, paths: Value) -> Tool {
+        self.set("paths", paths)
+    }
+
+    /// Parameters that only make sense when the session can run things in the background (not required ones).
+    pub fn background_parameters(self, names: &[&str]) -> Tool {
+        self.set("background_parameters", json!(names))
+    }
+
+    /// The tool runs commands: the package needs the `tools.commands` capability, and [`Call::channel`] lets `miyu call`
+    /// in those commands reach the session.
+    pub fn runs_commands(self, runs: bool) -> Tool {
+        self.set("runs_commands", json!(runs))
+    }
+}
+
+/// The extra checks [`Reply::changed_with`] can carry: content hashes ([`crate::content_hash`]) or the texts before and
+/// after. When one doesn't match what the core read, it drops the effect. `None` leaves it out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Change {
+    /// The content hash before the call; a new file has none.
+    pub before: Option<String>,
+    /// The content hash after.
+    pub after: Option<String>,
+    /// The whole text before the call.
+    pub before_text: Option<String>,
+    /// The whole text after.
+    pub after_text: Option<String>,
 }
 
 /// A tool's result. `blocks` are what the model sees; `error` marks a failure (explain it in the text); `data` goes only
 /// to scripts calling the tool with `miyu call`; `detail` only to the interfaces; `sent` are images she sends;
-/// `end_turn` ends the turn after this tool.
+/// `end_turn` ends the turn after this tool. `effects` say which files the call read, changed or trashed and the to-do
+/// list it wrote: [`Reply::changed`], [`Reply::read`], [`Reply::trashed`], [`Reply::todos`].
+///
+/// ```
+/// # use miyu_ext::Reply;
+/// let reply = Reply::text("Edited a.txt.").changed("/home/me/src/a.txt");
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct Reply {
     blocks: Vec<Value>,
@@ -92,6 +132,7 @@ pub struct Reply {
     detail: Option<Value>,
     sent: Option<Value>,
     end_turn: bool,
+    effects: Vec<Value>,
 }
 
 impl Reply {
@@ -140,6 +181,66 @@ impl Reply {
         self
     }
 
+    /// Add effects as the protocol writes them; the helpers below write the four kinds the core takes.
+    pub fn effects(mut self, effects: Vec<Value>) -> Reply {
+        self.effects.extend(effects);
+        self
+    }
+
+    /// The file at `path` was changed or created (`file.changed`). The core reads it itself, before the call and after
+    /// your answer, so the path is enough. It must be one of [`Call::checked`] from a parameter declared in
+    /// [`Tool::paths`] with `write`.
+    pub fn changed(self, path: &str) -> Reply {
+        self.changed_with(path, Change::default())
+    }
+
+    /// Same as [`Reply::changed`], with the extra checks in `change`.
+    pub fn changed_with(mut self, path: &str, change: Change) -> Reply {
+        let mut effect = json!({"kind": "file.changed", "path": path});
+        for (key, value) in [
+            ("before", change.before),
+            ("after", change.after),
+            ("before_text", change.before_text),
+            ("after_text", change.after_text),
+        ] {
+            if let Some(value) = value {
+                effect[key] = json!(value);
+            }
+        }
+        self.effects.push(effect);
+        self
+    }
+
+    /// The call read the file at `path` (`file.read`); `lines` is `[first, last]`, counting from 1. The path must be one
+    /// of [`Call::checked`].
+    pub fn read(mut self, path: &str, lines: Option<[u64; 2]>) -> Reply {
+        let mut effect = json!({"kind": "file.read", "path": path});
+        if let Some(lines) = lines {
+            effect["lines"] = json!(lines);
+        }
+        self.effects.push(effect);
+        self
+    }
+
+    /// The file at `path` went to the trash, now at `trash` (shown to people only, at most 4096 characters). The path
+    /// must be one of [`Call::checked`], declared with `write`, and gone by the time you answer.
+    pub fn trashed(mut self, path: &str, trash: &str) -> Reply {
+        self.effects
+            .push(json!({"kind": "file.trashed", "path": path, "trash": trash}));
+        self
+    }
+
+    /// The call replaced the to-do list (`todo.written`, as the built-in `todowrite`): `todos` is
+    /// `[{"content", "status"}]`, `done` the finished list it cleared. Not kept when the reply is a failure.
+    pub fn todos(mut self, todos: Value, done: Option<Value>) -> Reply {
+        let mut effect = json!({"kind": "todo.written", "todos": todos});
+        if let Some(done) = done {
+            effect["done"] = done;
+        }
+        self.effects.push(effect);
+        self
+    }
+
     pub(crate) fn into_json(self) -> Value {
         let mut out = json!({"blocks": self.blocks});
         for (key, value) in [
@@ -156,6 +257,9 @@ impl Reply {
         }
         if self.end_turn {
             out["end_turn"] = json!(true);
+        }
+        if !self.effects.is_empty() {
+            out["effects"] = Value::Array(self.effects);
         }
         out
     }
@@ -283,6 +387,18 @@ impl Core {
     }
 }
 
+/// The `miyu call` channel of one call ([`Call::channel`]): set it into the commands you start for the call with
+/// [`Call::command_env`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Channel {
+    /// The endpoint: a socket path on Unix, a named pipe on Windows. `MIYU_CALL_SOCK`.
+    pub sock: String,
+    /// The token. `MIYU_CALL_TOKEN`.
+    pub token: String,
+    /// A folder with only `miyu` in it, to put first on `PATH`; `None` when the core couldn't make it.
+    pub bin: Option<String>,
+}
+
 /// One `tool.call`: the arguments are already repaired to the schema. Check [`Call::cancelled`] in long work: it turns
 /// true when the call timed out or the person interrupted.
 pub struct Call {
@@ -333,5 +449,54 @@ impl Call {
     /// The core, to call its methods or read config.
     pub fn core(&self) -> &Core {
         &self.core
+    }
+
+    /// For tools that declare [`Tool::paths`]: the real locations the core's permission check allowed, in the order the
+    /// paths appear in the arguments. Write only these: a link on the path may have been swapped since the check. Empty
+    /// for other tools.
+    pub fn checked(&self) -> Vec<&str> {
+        self.params["checked"]
+            .as_array()
+            .map(|checked| checked.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    /// For tools that declare [`Tool::runs_commands`], when the session has a channel: where `miyu call` in the commands
+    /// you start reaches this session.
+    pub fn channel(&self) -> Option<Channel> {
+        let channel = &self.params["channel"];
+        Some(Channel {
+            sock: channel["sock"].as_str()?.to_string(),
+            token: channel["token"].as_str()?.to_string(),
+            bin: channel["bin"].as_str().map(String::from),
+        })
+    }
+
+    /// The environment to add to a command you start for this call: `MIYU_CALL_SOCK`, `MIYU_CALL_TOKEN` and `PATH` with
+    /// `bin` first, so `miyu call` in it reaches this session; empty without a channel. Start the command yourself (a
+    /// child or grandchild of this process) and answer after it ends: the channel closes with the answer.
+    ///
+    /// ```no_run
+    /// # fn run(call: &miyu_ext::Call) -> std::io::Result<std::process::Output> {
+    /// std::process::Command::new("sh").args(["-c", "miyu call memory_search --query x"]).envs(call.command_env()).output()
+    /// # }
+    /// ```
+    pub fn command_env(&self) -> Vec<(String, OsString)> {
+        let Some(channel) = self.channel() else {
+            return Vec::new();
+        };
+        let mut env = vec![
+            ("MIYU_CALL_SOCK".to_string(), OsString::from(channel.sock)),
+            ("MIYU_CALL_TOKEN".to_string(), OsString::from(channel.token)),
+        ];
+        if let Some(bin) = channel.bin.filter(|bin| !bin.is_empty()) {
+            let mut path = OsString::from(bin);
+            if let Some(old) = std::env::var_os("PATH").filter(|old| !old.is_empty()) {
+                path.push(if cfg!(windows) { ";" } else { ":" });
+                path.push(old);
+            }
+            env.push(("PATH".to_string(), path));
+        }
+        env
     }
 }

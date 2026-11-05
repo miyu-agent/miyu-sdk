@@ -4,14 +4,18 @@
 """
 
 import io
+import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from miyu_ext import CoreError, Extension, FakeCore, Reply  # noqa: E402
+from miyu_ext import CoreError, Extension, FakeCore, Reply, content_hash  # noqa: E402
 
 SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}}
 
@@ -181,6 +185,262 @@ class Others(unittest.TestCase):
         self.assertEqual(ext.config, {"o.a": 5})
         self.assertEqual(changes, [{"o.a": 5, "o.b": None}])
         core.close()
+
+
+EDIT_SCHEMA = {"type": "object", "properties": {
+    "file_path": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}},
+    "run_in_background": {"type": "boolean"}, "command": {"type": "string"}}, "required": ["file_path"]}
+
+
+def write(path, text):
+    with open(path, "w", encoding="utf-8", newline="") as file:
+        file.write(text)
+
+
+class Declarations(unittest.TestCase):
+    """规格多的三格（设计 63 第二节）：开发包照写进 `provide`，假核心照核心查。"""
+
+    def test_the_three_settings_go_into_the_spec(self):
+        ext = Extension("d")
+
+        @ext.tool("my_edit", "Edit.", EDIT_SCHEMA, access="write", paths=[{"parameter": "file_path", "write": True}],
+                  background_parameters=["run_in_background"], runs_commands=True)
+        def edit(args, call):
+            return "ok"
+
+        @ext.tool("plain", "Plain.", access="read")
+        def plain(args, call):
+            return "ok"
+
+        core = FakeCore(ext)
+        self.assertEqual(core.tools[0]["paths"], [{"parameter": "file_path", "write": True}])
+        self.assertEqual(core.tools[0]["background_parameters"], ["run_in_background"])
+        self.assertIs(core.tools[0]["runs_commands"], True)
+        self.assertEqual(set(core.tools[1]), {"name", "description", "input_schema", "access", "venues"},
+                         "a tool without them is as before")
+        self.assertIsNone(core.refused)
+        core.close()
+
+    def refused(self, approved=None, **settings):
+        ext = Extension("d")
+        settings.setdefault("access", "write")
+
+        @ext.tool("my_edit", "Edit.", EDIT_SCHEMA, **settings)
+        def edit(args, call):
+            return "ok"
+
+        with redirect_stderr():
+            core = FakeCore(ext, approved=approved)
+            core.close()
+        return core.refused
+
+    def test_wrong_declarations_are_bad_tool(self):
+        for problem, settings in (
+                ("paths", {"paths": [{"parameter": "nowhere"}]}),
+                ("paths", {"paths": [{"parameter": "run_in_background"}]}),
+                ("paths", {"paths": [{"parameter": "file_path", "write": True}], "access": "read"}),
+                ("paths", {"paths": [{"parameter": "file_path", "mode": "w"}]}),
+                ("paths", {"paths": [{"parameter": "file_path"}, {"parameter": "file_path"}]}),
+                ("paths", {"paths": {"parameter": "file_path"}}),
+                ("background_parameters", {"background_parameters": ["file_path"]}),
+                ("background_parameters", {"background_parameters": ["nowhere"]}),
+                ("runs_commands", {"runs_commands": "yes"})):
+            refused = self.refused(**settings)
+            self.assertEqual(refused["data"], {"reason": "bad_tool", "tool": "my_edit", "problem": problem}, settings)
+        self.assertIsNone(self.refused(paths=[{"parameter": "files"}], access="read"), "an array of strings is fine")
+
+    def test_running_commands_needs_tools_commands_approved(self):
+        refused = self.refused(approved=[], runs_commands=True)
+        self.assertEqual(refused["data"], {"reason": "needs_approval", "capabilities": ["tools.commands"]})
+        self.assertIsNone(self.refused(approved=["tools.commands"], runs_commands=True))
+        self.assertIsNone(self.refused(approved=[], runs_commands=False))
+
+
+class Effects(unittest.TestCase):
+    """回应的 `effects`（设计 63 第三、四节）：只收 `checked` 里的、改删要判了写的、四种、写法对的。"""
+
+    def setUp(self):
+        self.folder = os.path.realpath(tempfile.mkdtemp())
+        self.home = os.path.join(self.folder, "home")
+        os.mkdir(self.home)
+        self.ext = Extension("e")
+        self.seen = []
+        self.next = {}
+
+        def answer(args, call):
+            self.seen.append(call)
+            for path, text in self.next.pop("write", {}).items():
+                write(os.path.join(self.folder, path), text)
+            for path in self.next.pop("remove", []):
+                os.remove(os.path.join(self.folder, path))
+            if "raw" in self.next:
+                return self.next.pop("raw")
+            return Reply(text="done", error=self.next.pop("error", False), effects=self.next.pop("effects", []))
+
+        self.ext.tool("my_edit", "Edit.", EDIT_SCHEMA, access="write",
+                      paths=[{"parameter": "file_path", "write": True}, {"parameter": "files"}])(answer)
+        self.ext.tool("my_read", "Read.", EDIT_SCHEMA, access="read", paths=[{"parameter": "file_path"}])(answer)
+        self.ext.tool("no_paths", "None.", EDIT_SCHEMA, access="write")(answer)
+        self.core = FakeCore(self.ext, cwd=self.folder, home=self.home)
+
+    def tearDown(self):
+        self.core.close()
+        shutil.rmtree(self.folder)
+
+    def real(self, name):
+        return os.path.join(self.folder, name)
+
+    def call(self, tool="my_edit", args=None, **next_):
+        self.next = next_
+        self.core.effects.clear()
+        self.core.dropped.clear()
+        return self.core.call_tool(tool, args or {"file_path": "a.txt"})
+
+    def whys(self):
+        return [(one["kind"], one["why"]) for one in self.core.dropped]
+
+    def test_checked_follows_the_declared_paths(self):
+        os.mkdir(self.real("sub"))
+        self.call(args={"file_path": "~/n.txt", "files": ["sub/../b.txt", self.real("c.txt"), 3]})
+        self.assertEqual(self.seen[-1].checked, [os.path.join(self.home, "n.txt"), self.real("b.txt"),
+                                                 self.real("c.txt")], "in order; ~ is home; non-strings left out")
+        self.call(tool="no_paths")
+        self.assertNotIn("checked", self.seen[-1].params, "no paths declared: no checked")
+        self.assertEqual(self.seen[-1].checked, [])
+        self.assertIsNone(self.seen[-1].channel, "doesn't run commands: no channel")
+
+    def test_checked_follows_links(self):
+        os.mkdir(self.real("there"))
+        try:
+            os.symlink(self.real("there"), self.real("link"), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("no symlinks here")
+        self.call(args={"file_path": "link/a.txt"})
+        self.assertEqual(self.seen[-1].checked, [self.real(os.path.join("there", "a.txt"))])
+
+    def test_a_change_inside_checked_is_kept(self):
+        write(self.real("a.txt"), "old")
+        self.call(write={"a.txt": "new"}, effects=Reply().changed("a.txt", before=content_hash(b"old"),
+                                                                    after_text="new").effects)
+        self.assertEqual(self.core.effects, [{"kind": "file.changed", "path": self.real("a.txt")}])
+        self.assertEqual(self.core.dropped, [])
+        self.call(write={"n.txt": "made"}, args={"file_path": "n.txt"}, effects=Reply().changed("n.txt").effects)
+        self.assertEqual(self.core.effects, [{"kind": "file.changed", "path": self.real("n.txt")}], "a new file")
+
+    def test_paths_outside_checked_are_not_checked(self):
+        write(self.real("a.txt"), "a")
+        write(self.real("other.txt"), "o")
+        self.call(write={"other.txt": "changed"}, effects=Reply().changed("other.txt").read("other.txt").effects)
+        self.assertEqual(self.whys(), [("file.changed", "not_checked"), ("file.read", "not_checked")])
+        self.assertEqual(self.core.effects, [])
+        self.call(tool="no_paths", write={"a.txt": "b"}, effects=Reply().changed("a.txt").effects)
+        self.assertEqual(self.whys(), [("file.changed", "not_checked")], "no paths declared: no file effects")
+
+    def test_changing_and_trashing_need_a_write_path(self):
+        write(self.real("a.txt"), "a")
+        write(self.real("r.txt"), "r")
+        self.call(args={"file_path": "a.txt", "files": ["r.txt"]}, write={"r.txt": "changed"}, remove=["a.txt"],
+                  effects=Reply().changed("r.txt").read("r.txt", (1, 1)).trashed("a.txt", "/trash/a.txt").effects)
+        self.assertEqual(self.whys(), [("file.changed", "not_checked")], "files is declared for reading only")
+        self.assertEqual(self.core.effects, [
+            {"kind": "file.read", "path": self.real("r.txt"), "lines": [1, 1]},
+            {"kind": "file.trashed", "path": self.real("a.txt"), "trash": "/trash/a.txt"}])
+        write(self.real("a.txt"), "a")
+        self.call(tool="my_read", write={"a.txt": "b"}, effects=Reply().changed("a.txt").trashed("a.txt", "t").effects)
+        self.assertEqual(self.whys(), [("file.changed", "not_checked"), ("file.trashed", "not_checked")])
+
+    def test_only_four_kinds(self):
+        self.call(effects=[{"kind": "job.started", "job": "x"}, {"kind": "file.shown", "path": "a.txt"},
+                           {"kind": "package.state"}])
+        self.assertEqual(self.whys(), [("job.started", "kind"), ("file.shown", "kind"), ("package.state", "kind")])
+        self.call(effects=Reply().todos([{"content": "Write tests", "status": "in_progress"}]).effects)
+        self.assertEqual(self.core.effects, [{"kind": "todo.written",
+                                              "todos": [{"content": "Write tests", "status": "in_progress"}]}])
+
+    def test_wrong_shapes_are_dropped(self):
+        write(self.real("a.txt"), "a")
+        self.call(write={"a.txt": "b"}, effects=[
+            "file.changed", {"path": "a.txt"}, {"kind": "file.changed"}, {"kind": "file.changed", "path": 1},
+            {"kind": "file.changed", "path": "a.txt", "before": "md5:x"},
+            {"kind": "file.read", "path": "a.txt", "lines": [0, 3]},
+            {"kind": "file.read", "path": "a.txt", "lines": [3, 2]},
+            {"kind": "file.trashed", "path": "a.txt", "trash": "x" * 4097},
+            {"kind": "todo.written", "todos": [{"content": "x"}]},
+            {"kind": "todo.written", "todos": [], "done": None},
+            {"kind": "file.changed", "path": "a.txt"}, {"kind": "file.changed", "path": "a.txt"}])
+        self.assertEqual(self.whys(), [("-", "shape"), ("-", "shape")] + [("file.changed", "shape")] * 3
+                         + [("file.read", "shape")] * 2 + [("file.trashed", "shape")] + [("todo.written", "shape")] * 2
+                         + [("file.changed", "shape")], "the second report of the same file too")
+        self.assertEqual(len(self.core.effects), 1)
+        self.next = {"raw": {"blocks": [], "effects": {"kind": "file.changed"}}}
+        self.core.dropped.clear()
+        self.core.call_tool("my_edit", {"file_path": "a.txt"})
+        self.assertEqual(self.whys(), [("-", "shape")], "effects that aren't a list are dropped whole")
+        self.next = {"raw": {"blocks": [], "effects": None}}
+        self.core.dropped.clear()
+        self.core.call_tool("my_edit", {"file_path": "a.txt"})
+        self.assertEqual(self.whys(), [], "null is not written")
+
+    def test_the_core_reads_the_file_itself(self):
+        write(self.real("a.txt"), "same")
+        self.call(write={"a.txt": "same"}, effects=Reply().changed("a.txt").effects)
+        self.assertEqual(self.whys(), [("file.changed", "unchanged")])
+        self.call(write={"a.txt": "new"}, effects=Reply().changed("a.txt", before_text="not it").effects)
+        self.assertEqual(self.whys(), [("file.changed", "mismatch")])
+        self.call(write={"a.txt": "newer"}, effects=Reply().changed("a.txt", after=content_hash(b"x")).effects)
+        self.assertEqual(self.whys(), [("file.changed", "mismatch")])
+        self.call(args={"file_path": "n.txt"}, write={"n.txt": "made"},
+                  effects=Reply().changed("n.txt", before_text="").effects)
+        self.assertEqual(self.whys(), [("file.changed", "mismatch")], "a new file had no before")
+        self.call(effects=Reply().trashed("a.txt", "t").effects)
+        self.assertEqual(self.whys(), [("file.trashed", "mismatch")], "still there")
+        self.call(args={"file_path": "gone.txt"}, effects=Reply().changed("gone.txt").effects)
+        self.assertEqual(self.whys(), [("file.changed", "mismatch")], "not there after")
+
+    def test_too_big(self):
+        with open(self.real("big"), "wb") as file:
+            file.truncate(20 * 1024 * 1024 + 1)
+        self.call(args={"file_path": "big"}, effects=Reply().changed("big").read("big").effects)
+        self.assertEqual(self.whys(), [("file.changed", "too_big"), ("file.read", "too_big")])
+
+    def test_an_error_keeps_files_but_not_todos(self):
+        write(self.real("a.txt"), "a")
+        self.call(error=True, write={"a.txt": "half"},
+                  effects=Reply().changed("a.txt").todos([{"content": "x", "status": "pending"}]).effects)
+        self.assertEqual(self.core.effects, [{"kind": "file.changed", "path": self.real("a.txt")}])
+        self.assertEqual(self.core.dropped, [], "the to-do list is left out without a word")
+
+
+class Commands(unittest.TestCase):
+    """`runs_commands` 的通道（设计 63 第六节第 2 条）：`tool.call` 带 `channel`，`command_env` 设进子进程。"""
+
+    def test_the_channel_reaches_the_command(self):
+        ext = Extension("c")
+        script = ("import json, os; print(json.dumps([os.environ.get('MIYU_CALL_SOCK'), "
+                  "os.environ.get('MIYU_CALL_TOKEN'), os.environ['PATH'].split(os.pathsep)[0]]))")
+
+        @ext.tool("my_shell", "Run.", EDIT_SCHEMA, access="execute", runs_commands=True)
+        def run(args, call):
+            done = subprocess.run([sys.executable, "-c", script], env=call.command_env(), capture_output=True,
+                                  text=True, check=True)
+            return done.stdout.strip()
+
+        core = FakeCore(ext, approved=["tools.commands"])
+        sock, token, first = json.loads(core.call_tool("my_shell", {"file_path": "x"})["blocks"][0]["text"])
+        self.assertEqual((sock, token, first), (core.channel["sock"], core.channel["token"], core.channel["bin"]))
+        core.channel = None
+        sock, token, first = json.loads(core.call_tool("my_shell", {"file_path": "x"})["blocks"][0]["text"])
+        self.assertEqual((sock, token), (None, None), "no channel: nothing set")
+        core.close()
+
+    def test_command_env_without_bin_keeps_path(self):
+        from miyu_ext import Call
+        call = Call({"channel": {"sock": "/s", "token": "t" * 32}})
+        env = call.command_env({"PATH": "/usr/bin", "KEEP": "1"})
+        self.assertEqual(env, {"PATH": "/usr/bin", "KEEP": "1", "MIYU_CALL_SOCK": "/s", "MIYU_CALL_TOKEN": "t" * 32})
+        call = Call({"channel": {"sock": "/s", "token": "t", "bin": "/b"}})
+        self.assertEqual(call.command_env({})["PATH"], "/b", "no PATH before: just bin")
+        self.assertEqual(Call({}).command_env({"A": "1"}), {"A": "1"})
 
 
 class redirect_stderr:

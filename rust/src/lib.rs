@@ -21,14 +21,17 @@
 //! ext.run();
 //! ```
 
+mod effects;
 mod extension;
 mod fake;
+mod hash;
 mod reply;
 mod wire;
 
 pub use extension::Extension;
 pub use fake::FakeCore;
-pub use reply::{Call, Core, CoreError, Reply, Tool};
+pub use hash::content_hash;
+pub use reply::{Call, Change, Channel, Core, CoreError, Reply, Tool};
 
 /// The protocol major versions this crate speaks.
 pub const PROTOCOL: [u64; 2] = [1, 1];
