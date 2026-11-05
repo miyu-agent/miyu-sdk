@@ -1,5 +1,5 @@
 //! 规格多的三格、`checked`、`channel`、回应的 `effects`（核心设计 63 第二到六节），经假核心走协议，和 Python 那份的
-//! `Declarations`、`Effects`、`Commands` 一一对应。
+//! `Declarations`、`Effects`、`Commands` 一一对应；例子 `examples/replace.rs` 也照它跑一遍。
 
 // `allow-unwrap-in-tests` covers `#[test]` functions only; the helpers here are test code too.
 #![allow(clippy::unwrap_used)]
@@ -11,6 +11,10 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Map, Value, json};
 
 use miyu_ext::{Change, Extension, FakeCore, Reply, Tool, content_hash};
+
+#[path = "../examples/replace.rs"]
+#[allow(dead_code)]
+mod replace;
 
 /// 一个测试用的临时目录（真实位置），丢掉时删掉。
 struct Folder(PathBuf);
@@ -763,4 +767,46 @@ fn the_channel_reaches_the_command() {
         "{}",
         "no channel: nothing set"
     );
+}
+
+#[test]
+fn replace_edits_the_checked_file_and_reports_it() {
+    let folder = Folder::new();
+    folder.write("a.txt", "hello world\n");
+    let core = FakeCore::start(replace::extension(), Map::new());
+    core.set_cwd(&folder.0);
+    assert_eq!(
+        core.tools()[0]["paths"],
+        json!([{"parameter": "file_path", "write": true}])
+    );
+    let answer = core.call_tool(
+        "replace_text",
+        json!({"file_path": "a.txt", "old": "world", "new": "there"}),
+    );
+    assert_eq!(text(&answer), "Replaced in a.txt.");
+    assert_eq!(
+        std::fs::read_to_string(folder.join("a.txt")).unwrap(),
+        "hello there\n"
+    );
+    assert_eq!(
+        core.effects(),
+        [json!({"kind": "file.changed", "path": folder.text("a.txt")})],
+        "kept, like the built-in edit"
+    );
+    assert!(core.dropped().is_empty());
+    let same = core.call_tool(
+        "replace_text",
+        json!({"file_path": "a.txt", "old": "there", "new": "there"}),
+    );
+    assert_eq!(same.get("error"), None);
+    assert_eq!(
+        core.dropped(),
+        [json!({"tool": "replace_text", "kind": "file.changed", "why": "unchanged"})]
+    );
+    let missing = core.call_tool(
+        "replace_text",
+        json!({"file_path": "a.txt", "old": "nowhere", "new": "x"}),
+    );
+    assert_eq!(missing["error"], true);
+    assert_eq!(core.close(), Ok(()));
 }

@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""The replace extension, written with miyu_ext: a tool that edits files the way the built-in `edit` does. It declares its
+path parameter, writes only where the core's check allowed (`call.checked`) and reports the change, so the timeline shows
+the diff and a file she read stays known. Copy miyu_ext.py into this bin/ folder, then `miyu pkg install` the folder."""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from miyu_ext import Extension, Reply  # noqa: E402
+
+ext = Extension("replace", "0.1.0")
+
+
+@ext.tool("replace_text", "Replace one exact piece of text in a file. `old` must occur exactly once.",
+          {"type": "object",
+           "properties": {"file_path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}},
+           "required": ["file_path", "old", "new"]},
+          access="write", display_name={"en": "Replace", "zh": "替换"}, subject="file_path",
+          paths=[{"parameter": "file_path", "write": True}])
+def replace(args, call):
+    if not call.checked:
+        return Reply(text="file_path is missing.", error=True)
+    # Where the core's check allowed writing: the argument resolved, links followed. Write here, not the raw argument.
+    path = call.checked[0]
+    try:
+        with open(path, encoding="utf-8", newline="") as file:
+            text = file.read()
+    except (OSError, UnicodeDecodeError) as error:
+        return Reply(text=f"Can't read {args['file_path']}: {error}", error=True)
+    count = text.count(args["old"]) if args["old"] else 0
+    if count != 1:
+        return Reply(text=f"`old` occurs {count} times in {args['file_path']}; it must occur exactly once.", error=True)
+    try:
+        with open(path, "w", encoding="utf-8", newline="") as file:
+            file.write(text.replace(args["old"], args["new"], 1))
+    except OSError as error:
+        return Reply(text=f"Can't write {args['file_path']}: {error}", error=True)
+    return Reply(text=f"Replaced in {args['file_path']}.").changed(path)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["serve"]:
+        ext.run()
+    else:
+        print("usage: miyu-replace serve (started by the Miyu core)", file=sys.stderr)
+        sys.exit(2)
