@@ -42,6 +42,9 @@ One file for all three platforms: Linux and macOS start it by its `#!` line (the
 |---|---|
 | `@ext.tool(name, description, schema, access=…)` | A tool: the function gets `(args, call)` and returns text, a `Reply` or a full answer. `call.cancelled` says whether it timed out or the person interrupted |
 | `Reply(text, error, data, detail, sent, end_turn)` | A full answer: `data` goes only to scripts that call the tool with `miyu call` (one line of JSON), `detail` only to heads for cards, `sent` are images she sends, `end_turn` ends the turn here |
+| `@ext.tool(…, paths=…, background_parameters=…, runs_commands=…)` | Three more spec settings: which parameters are paths (`[{"parameter": "file_path", "write": True}]`), parameters only given when the session can run things in the background, and that the tool runs commands. See "Tools that edit files or run commands" below |
+| `Reply(…).changed(path)`, `.read(path, lines)`, `.trashed(path, trash)`, `.todos(todos, done)` | The answer's `effects`: files changed, read or moved to the trash, and the to-do list it wrote. `changed` can carry `before`, `after` (`content_hash(…)`) or `before_text`, `after_text` as an extra check |
+| `call.checked`, `call.channel`, `call.command_env()` | The real paths the core's check allowed (tools declaring `paths`); the `miyu call` channel (tools declaring `runs_commands`) and an environment for child processes with it set |
 | `@ext.command(name)` | A slash command from the manifest's `[[slash]]`: return the text shown to the person |
 | `@ext.method(name)` | A method called by your page, a widget button or another package: the function gets `(params, caller)` |
 | `@ext.on(method)` | Other calls and pushes from the core: `user.append`, `search.query`, `widget.watch`… |
@@ -60,6 +63,8 @@ core = FakeCore(ext, config={"hello.greeting": "Hi"})
 assert core.call_tool("hello_greet", {"name": "Ann"})["blocks"][0]["text"] == "Hi, Ann!"
 core.close()
 ```
+
+The fake core checks the three spec settings the way the core does (a wrong one is `bad_tool`; a tool that runs commands without `tools.commands` in `approved` is `needs_approval`, and by default everything is approved); a refusal is in `core.refused`. `call_tool` sends `checked` (the declared paths resolved against `core.cwd` and `core.home`) and `channel` (a fake one, `core.channel`, not served) as the core does, and vets the answer's `effects` as the core does: the kept ones go to `core.effects` (paths as real locations), the dropped ones to `core.dropped`, one `{"tool", "kind", "why"}` each.
 
 This repository's own tests: `python3 -m unittest discover -s python/tests`.
 
@@ -86,6 +91,51 @@ ext.run();
 ```
 
 The full example is `rust/examples/hello.rs` (`cargo build --example hello`; put the binary in the package's `bin/` as `miyu-hello`, `miyu-hello.exe` on Windows). `FakeCore::start(ext, config)` works like the Python fake core; tests: `cargo test` in `rust/`.
+
+The names in both kits (for the next section):
+
+| Python | Rust |
+|---|---|
+| `@ext.tool(…, paths=[…], background_parameters=[…], runs_commands=True)` | `Tool::paths(json!([…]))`, `.background_parameters(&[…])`, `.runs_commands(true)` |
+| `Reply(effects=[…])` | `Reply::effects(vec![…])` |
+| `.changed(path)`, `.changed(path, before=…, after=…, before_text=…, after_text=…)` | `.changed(path)`, `.changed_with(path, Change { before, after, before_text, after_text })` |
+| `.read(path, lines=(1, 20))`, `.trashed(path, trash)`, `.todos(todos, done=None)` | `.read(path, Some([1, 20]))`, `.trashed(path, trash)`, `.todos(todos, None)` |
+| `content_hash(data)` | `content_hash(&data)` |
+| `call.checked` (a list), `call.channel` (a dict or `None`) | `call.checked()` (`Vec<&str>`), `call.channel()` (`Option<Channel>`) |
+| `call.command_env()`: the whole environment (a copy of `os.environ` plus the channel) | `call.command_env()`: only what to add, for `Command::envs` |
+| `FakeCore(ext, approved=[…], cwd=…, home=…)`, `core.channel = …` | `FakeCore::start_approved(ext, config, &[…])`, `set_cwd`, `set_home`, `set_channel` |
+| `core.refused`, `core.effects`, `core.dropped` | `core.refused()`, `core.effects()`, `core.dropped()`, `clear_effects()` |
+
+## Tools that edit files or run commands
+
+From core XG-1 (2490fb77, 514bdc40) on. The protocol is in the core repository's `docs/reference/extensions.en.md` (`provide`, and "Effects" and "Running commands" under `tool.call`); how to write them is in "Tools that change files" and "Tools that run commands" in `docs/authors/extensions.en.md`.
+
+**Editing files** (editors, formatters, renamers): to get diffs and line counts like the built-in `edit`, and so a file she read and you changed needn't be read again:
+
+1. Declare `paths` in the spec, with `write` access: the core checks them (writing outside the workspace asks the person first; you get no call before they agree).
+2. Write only the locations in `call.checked`: the real locations the check allowed, in the order of the paths in the arguments. Don't write the argument's path yourself (a link on it may have been swapped since the check).
+3. Report `changed(path)` in the answer: only which file; the core reads the content itself (before, as it sends the call; after, when you answer). An unchanged file, a path not in `checked`, a change or trash on a path checked for reading only, an unknown kind or a wrong shape: the core drops that one effect and the result stands.
+
+```python
+@ext.tool("replace_text", "Replace one exact piece of text in a file.", SCHEMA, access="write",
+          paths=[{"parameter": "file_path", "write": True}])
+def replace(args, call):
+    path = call.checked[0]
+    ...  # edit path
+    return Reply(text="Replaced.").changed(path)
+```
+
+Full examples: `python/examples/replace/` and `rust/examples/replace.rs`; the tests run them against the fake core.
+
+**Running commands** (replacing the built-in `shell`, running in a container): add the `tools.commands` capability to the manifest and `runs_commands=True` to the spec. When the session has tools scripts can call, `call.channel` is this call's channel; start commands with `call.command_env()` as their environment (it sets `MIYU_CALL_SOCK`, `MIYU_CALL_TOKEN` and puts `bin` first on `PATH`), and `miyu call` in them calls tools as this session. The command must be started by your extension process (a descendant), and you answer after it ends: the channel closes with the answer.
+
+```python
+subprocess.run(command, shell=True, cwd=call.cwd, env=call.command_env())
+```
+
+```rust
+std::process::Command::new("sh").args(["-c", command]).envs(call.command_env()).status()
+```
 
 ## Versions
 
