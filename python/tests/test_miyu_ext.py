@@ -15,7 +15,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from miyu_ext import CoreError, Extension, FakeCore, Reply, content_hash  # noqa: E402
+from miyu_ext import CoreError, Extension, FakeCore, MethodError, Reply, content_hash  # noqa: E402
 
 SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}}
 
@@ -56,6 +56,32 @@ class Handshake(unittest.TestCase):
 
         core = FakeCore(ext)
         self.assertEqual(core.tools, [], "provide once, empty, so commands and search work")
+        self.assertEqual(core.methods, [{"name": "status"}])
+        core.close()
+
+    def test_methods_carry_waits_codes_and_can_wait_to_register(self):
+        ext = Extension("voice")
+
+        @ext.method("stt.transcribe", timeout_ms=120000, later=True)
+        def transcribe(params, caller):
+            if "audio" not in params:
+                raise MethodError("bad_audio", "No audio.")
+            return {"text": "hi"}
+
+        @ext.method("status")
+        def status(params, caller):
+            return {}
+
+        core = FakeCore(ext)
+        self.assertEqual(core.methods, [{"name": "status"}], "later ones wait")
+        with self.assertRaises(ValueError):
+            ext.enable_methods(["nope"])
+        ext.enable_methods(["stt.transcribe"])
+        self.assertEqual(core.methods, [{"name": "status"}, {"name": "stt.transcribe", "timeout_ms": 120000}])
+        refused = core.request("method.call", {"method": "stt.transcribe", "params": {}})
+        self.assertEqual(refused["error"]["code"], -32000)
+        self.assertEqual(refused["error"]["data"], {"code": "bad_audio"})
+        ext.disable_methods(["stt.transcribe"])
         self.assertEqual(core.methods, [{"name": "status"}])
         core.close()
 

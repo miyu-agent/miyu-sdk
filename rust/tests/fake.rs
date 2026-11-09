@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
-use miyu_ext::{Extension, FakeCore, Reply, Tool};
+use miyu_ext::{Extension, FakeCore, Method, MethodError, Reply, Tool};
 
 fn config(pairs: &[(&str, Value)]) -> Map<String, Value> {
     pairs
@@ -88,6 +88,57 @@ fn provides_even_without_tools_and_lists_methods() {
         core.request("method.call", json!({"method": "nope"}))["error"]["code"],
         -32601
     );
+    assert_eq!(core.close(), Ok(()));
+}
+
+#[test]
+fn methods_carry_waits_codes_and_can_wait_to_register() {
+    let mut ext = Extension::new("voice", "0.0.0");
+    ext.method_with(
+        Method::new("stt.transcribe").timeout_ms(120_000).later(),
+        |params, _, _| {
+            if params["audio"].is_null() {
+                return Err(MethodError::new("bad_audio", "No audio."));
+            }
+            Ok(json!({"text": "hi"}))
+        },
+    );
+    ext.method("status", |_, _, _| Ok(json!({})));
+    let (tx, rx) = std::sync::mpsc::channel();
+    ext.ready(move |core| {
+        tx.send(core.clone()).unwrap_or_default();
+    });
+    let core = FakeCore::start(ext, Map::new());
+    assert_eq!(
+        core.methods(),
+        [json!({"name": "status"})],
+        "later ones wait"
+    );
+    let ext_core = rx.recv().expect("ready ran");
+    assert!(
+        ext_core.enable_methods(&["nope"]).is_err(),
+        "unknown names are refused"
+    );
+    ext_core
+        .enable_methods(&["stt.transcribe"])
+        .expect("registered");
+    assert_eq!(
+        core.methods(),
+        [
+            json!({"name": "status"}),
+            json!({"name": "stt.transcribe", "timeout_ms": 120_000})
+        ]
+    );
+    let refused = core.request(
+        "method.call",
+        json!({"method": "stt.transcribe", "params": {}}),
+    );
+    assert_eq!(refused["error"]["data"]["code"], "bad_audio", "{refused}");
+    assert_eq!(refused["error"]["code"], -32000);
+    ext_core
+        .disable_methods(&["stt.transcribe"])
+        .expect("unregistered");
+    assert_eq!(core.methods(), [json!({"name": "status"})]);
     assert_eq!(core.close(), Ok(()));
 }
 

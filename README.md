@@ -46,7 +46,7 @@ if __name__ == "__main__":
 | `Reply(…).changed(path)`、`.read(path, lines)`、`.trashed(path, trash)`、`.todos(todos, done)` | 回答里的 `effects`：改了、读了、删进回收站的文件，换上的待办。`changed` 可以带 `before`、`after`（`content_hash(…)`）或 `before_text`、`after_text` 多核对一层 |
 | `call.checked`、`call.channel`、`call.command_env()` | 核心判过的真实路径（声明了 `paths` 的）；`miyu call` 的通道（声明了 `runs_commands` 的）和设好通道的子进程环境 |
 | `@ext.command(name)` | 清单 `[[slash]]` 里的一条斜杠命令：交回给人看的那段话 |
-| `@ext.method(name)` | 后台页、界面块的按钮、别的包调的方法：函数收 `(params, caller)` |
+| `@ext.method(name, timeout_ms=None, later=False)` | 后台页、界面块的按钮、头、别的包（照总线的名字或者包编号）调的方法：函数收 `(params, caller)`；抛 `MethodError(code, message)` 回带码的错（码在错误的 `data.code`）；`timeout_ms` 是核心等多久（1000 到 600000，默认 30 秒）；`later=True` 先不登记，等 `ext.enable_methods([...])`（比如模型下好了），`ext.disable_methods([...])` 撤掉 |
 | `@ext.on(method)` | 别的反向调用、推送：`user.append`、`search.query`、`widget.watch`…… |
 | `@ext.on_config`、`ext.config` | 配置推送；握手时的配置在 `ext.config` |
 | `@ext.ready` | 握手、登记完以后在自己的线程里跑一次 |
@@ -105,6 +105,8 @@ ext.run();
 | `call.command_env()`：整份环境（`os.environ` 的副本加上通道） | `call.command_env()`：只是要加的几项，给 `Command::envs` |
 | `FakeCore(ext, approved=[…], cwd=…, home=…)`、`core.channel = …` | `FakeCore::start_approved(ext, config, &[…])`、`set_cwd`、`set_home`、`set_channel` |
 | `core.refused`、`core.effects`、`core.dropped` | `core.refused()`、`core.effects()`、`core.dropped()`、`clear_effects()` |
+| `@ext.method(name, timeout_ms=…, later=True)`、`raise MethodError(code, message)` | `ext.method_with(Method::new(name).timeout_ms(…).later(), …)`、`Err(MethodError::new(code, message))`（只写名字、回 `Err(String)` 的照旧） |
+| `ext.enable_methods([…])`、`ext.disable_methods([…])` | `core.enable_methods(&[…])`、`core.disable_methods(&[…])` |
 
 ## 改文件、跑命令的工具
 

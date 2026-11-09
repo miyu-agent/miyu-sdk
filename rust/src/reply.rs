@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
+use crate::method::Registry;
 use crate::wire::Wire;
 
 /// A tool's spec, as `provide` sends it. `description` and the schema are for the model: short English sentences, at
@@ -319,6 +320,7 @@ pub(crate) struct Shared {
     pub(crate) config: Mutex<Map<String, Value>>,
     pub(crate) language: Mutex<String>,
     pub(crate) account: Mutex<Option<String>>,
+    pub(crate) methods: Mutex<Registry>,
 }
 
 /// The core, from a handler: call its methods, read this package's config.
@@ -379,6 +381,52 @@ impl Core {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Register the [later](crate::Method::later) methods named, with the ones already registered (`package.methods`
+    /// replaces the whole list, so it is sent again in full). Call it once they can answer: a model downloaded, a key set.
+    ///
+    /// # Errors
+    ///
+    /// A name never declared with [`crate::Extension::method`] (nothing is sent then), or the core refused the list.
+    pub fn enable_methods(&self, names: &[&str]) -> Result<(), CoreError> {
+        self.switch_methods(names, true)
+    }
+
+    /// Unregister the methods named, keeping the rest: callers get `unregistered` and the bus stops counting them
+    /// ready, until [`Core::enable_methods`] names them again.
+    ///
+    /// # Errors
+    ///
+    /// A name never declared (nothing is sent then), or the core refused the list.
+    pub fn disable_methods(&self, names: &[&str]) -> Result<(), CoreError> {
+        self.switch_methods(names, false)
+    }
+
+    fn switch_methods(&self, names: &[&str], on: bool) -> Result<(), CoreError> {
+        // Held while sending, so two switches from different threads reach the core in the order they changed the list.
+        let mut methods = self
+            .shared
+            .methods
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        methods.set(names, on).map_err(|unknown| CoreError {
+            code: None,
+            reason: Some("unknown_method".to_string()),
+            message: format!("never declared: {}", unknown.join(", ")),
+            data: json!({"reason": "unknown_method"}),
+        })?;
+        self.call("package.methods", methods.params()).map(drop)
+    }
+
+    /// Send the methods registered now.
+    pub(crate) fn register_methods(&self) -> Result<(), CoreError> {
+        let methods = self
+            .shared
+            .methods
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.call("package.methods", methods.params()).map(drop)
     }
 
     /// Say why on stderr and exit with code 1, which tells the core not to restart: for wrong settings and taken ports.

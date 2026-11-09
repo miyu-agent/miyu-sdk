@@ -38,6 +38,8 @@ EXIT_CONFIG = 1
 _METHOD_NOT_FOUND = -32601
 _INTERNAL_ERROR = -32603
 _MIYU_ERROR = -32010
+#: A method's error with a code (`MethodError`): JSON-RPC's server-error range, the code in `data.code`.
+_CODED_ERROR = -32000
 
 
 def content_hash(data):
@@ -54,6 +56,16 @@ class CoreError(Exception):
         self.reason = self.data.get("reason")
         self.message = error.get("message", "")
         super().__init__(f"{self.reason or self.code}: {self.message}")
+
+
+class MethodError(Exception):
+    """Raise it from a method to answer with an error callers can tell apart: `code` (`bad_audio`, `mic_busy`) goes back
+    in the JSON-RPC error's `data.code`, `message` is for people. Any other exception goes back without a code."""
+
+    def __init__(self, code, message):
+        self.code = code
+        self.message = message
+        super().__init__(f"{code}: {message}")
 
 
 class Reply:
@@ -197,6 +209,8 @@ class Extension:
         self._tool_handlers = {}
         self._commands = {}
         self._methods = {}
+        self._method_specs = {}
+        self._methods_lock = threading.Lock()
         self._handlers = {}
         self._config_handlers = []
         self._ready_handlers = []
@@ -255,15 +269,51 @@ class Extension:
 
         return register
 
-    def method(self, name):
-        """Handle the method `name` called from your page, a widget button or another package (`method.call`). The
-        function gets `(params, caller)`: `caller` is the calling package's id, or `None` for a person."""
+    def method(self, name, *, timeout_ms=None, later=False):
+        """Handle the method `name` called from your page, a widget button, a head or another package (`method.call`;
+        a bus name's methods are written in full, `stt.transcribe`). The function gets `(params, caller)`: `caller` is
+        the calling package's id, or `None` for a person; raise `MethodError` for an error with a code. `timeout_ms`
+        (1000 to 600000) is how long the core waits, by default 30 seconds. `later=True` leaves it unregistered until
+        `enable_methods` names it, for example once a model has downloaded."""
 
         def register(function):
             self._methods[name] = function
+            self._method_specs[name] = {"timeout_ms": timeout_ms, "on": not later}
             return function
 
         return register
+
+    def enable_methods(self, names):
+        """Register the `later` methods named, with the ones already registered (`package.methods` replaces the whole
+        list, so it is sent in full). Raises `ValueError` for a name never declared (nothing is sent then), `CoreError`
+        when the core refuses."""
+        self._switch_methods(names, True)
+
+    def disable_methods(self, names):
+        """Unregister the methods named, keeping the rest, until `enable_methods` names them again. Raises like
+        `enable_methods`."""
+        self._switch_methods(names, False)
+
+    def _switch_methods(self, names, on):
+        # Held while sending, so switches from two threads reach the core in the order they changed the list.
+        with self._methods_lock:
+            unknown = [name for name in names if name not in self._method_specs]
+            if unknown:
+                raise ValueError(f"never declared: {', '.join(unknown)}")
+            for name in names:
+                self._method_specs[name]["on"] = on
+            self.call("package.methods", self._methods_params())
+
+    def _methods_params(self):
+        methods = []
+        for name in sorted(self._method_specs):
+            spec = self._method_specs[name]
+            if spec["on"]:
+                entry = {"name": name}
+                if spec["timeout_ms"] is not None:
+                    entry["timeout_ms"] = spec["timeout_ms"]
+                methods.append(entry)
+        return {"methods": methods}
 
     def on(self, method):
         """Handle any other request or notification from the core, such as `user.append`, `search.query` or
@@ -358,7 +408,8 @@ class Extension:
         try:
             self.call("provide", {"tools": self._tools})
             if self._methods:
-                self.call("package.methods", {"methods": [{"name": name} for name in self._methods]})
+                with self._methods_lock:
+                    self.call("package.methods", self._methods_params())
         except (CoreError, TimeoutError) as error:
             print(f"miyu_ext: registering failed: {error}", file=sys.stderr, flush=True)
             return
@@ -406,6 +457,10 @@ class Extension:
         except _NotFound:
             self._send({"jsonrpc": "2.0", "id": request_id,
                         "error": {"code": _METHOD_NOT_FOUND, "message": f"no handler for {method}"}})
+            return
+        except MethodError as error:
+            self._send({"jsonrpc": "2.0", "id": request_id,
+                        "error": {"code": _CODED_ERROR, "message": error.message, "data": {"code": error.code}}})
             return
         except Exception as error:  # a handler's bug: report it, keep serving
             traceback.print_exc(file=sys.stderr)

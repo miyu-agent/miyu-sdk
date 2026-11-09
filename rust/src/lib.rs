@@ -25,12 +25,14 @@ mod effects;
 mod extension;
 mod fake;
 mod hash;
+mod method;
 mod reply;
 mod wire;
 
 pub use extension::Extension;
 pub use fake::FakeCore;
 pub use hash::content_hash;
+pub use method::{Method, MethodError};
 pub use reply::{Call, Change, Channel, Core, CoreError, Reply, Tool};
 
 /// The protocol major versions this crate speaks.

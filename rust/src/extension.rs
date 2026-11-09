@@ -9,13 +9,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Map, Value, json};
 
+use crate::method::{Method, MethodError, Registry};
 use crate::reply::{Call, Core, Reply, Shared, Tool};
 use crate::wire::{Wire, not_found};
 use crate::{EXIT_CONFIG, PROTOCOL};
 
 type ToolFn = Box<dyn Fn(&Value, &Call) -> Reply + Send + Sync>;
 type CommandFn = Box<dyn Fn(&Value, &Core) -> String + Send + Sync>;
-type MethodFn = Box<dyn Fn(&Value, Option<&str>, &Core) -> Result<Value, String> + Send + Sync>;
+type MethodFn =
+    Box<dyn Fn(&Value, Option<&str>, &Core) -> Result<Value, MethodError> + Send + Sync>;
 type OnFn = Box<dyn Fn(&Value, &Core) -> Value + Send + Sync>;
 type ConfigFn = Box<dyn Fn(&Map<String, Value>, &Core) + Send + Sync>;
 type ReadyFn = Box<dyn Fn(&Core) + Send + Sync>;
@@ -37,6 +39,7 @@ pub struct Extension {
     version: String,
     specs: Vec<Value>,
     handlers: Handlers,
+    registry: Registry,
 }
 
 impl Extension {
@@ -47,6 +50,7 @@ impl Extension {
             version: version.to_string(),
             specs: Vec::new(),
             handlers: Handlers::default(),
+            registry: Registry::default(),
         }
     }
 
@@ -75,16 +79,33 @@ impl Extension {
         self
     }
 
-    /// Handle the method `name` called by your page, a widget button or another package: `handler` gets the params and
-    /// the calling package's id (`None` for a person); an `Err` goes back as a JSON-RPC error.
+    /// Handle the method `name` called by your page, a widget button, a head or another package: `handler` gets the
+    /// params and the calling package's id (`None` for a person); an `Err` goes back as a JSON-RPC error. Registered once
+    /// the handshake is done, with the core's default wait; for a wait, a coded error or later registration use
+    /// [`Extension::method_with`].
     pub fn method(
         &mut self,
         name: &str,
         handler: impl Fn(&Value, Option<&str>, &Core) -> Result<Value, String> + Send + Sync + 'static,
     ) -> &mut Extension {
-        self.handlers
-            .methods
-            .insert(name.to_string(), Box::new(handler));
+        self.method_with(Method::new(name), move |params, from, core| {
+            handler(params, from, core).map_err(MethodError::from)
+        })
+    }
+
+    /// Same as [`Extension::method`] for a [`Method`] (a bus name's methods are written in full, `stt.transcribe`): with
+    /// how long the core waits, maybe registered [later](Method::later); an `Err` with a [`MethodError::code`] goes back
+    /// with the code in the error's `data.code`, so callers can tell `bad_audio` from `mic_busy`.
+    pub fn method_with(
+        &mut self,
+        method: Method,
+        handler: impl Fn(&Value, Option<&str>, &Core) -> Result<Value, MethodError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> &mut Extension {
+        self.registry.declare(&method);
+        self.handlers.methods.insert(method.name, Box::new(handler));
         self
     }
 
@@ -118,7 +139,7 @@ impl Extension {
 
     /// Whether any method is registered: then registration ends with `package.methods`, not `provide`.
     pub(crate) fn has_methods(&self) -> bool {
-        !self.handlers.methods.is_empty()
+        !self.registry.is_empty()
     }
 
     /// Serve on stdin and stdout until stdin ends (the core asking you to stop). A refused handshake or a protocol
@@ -146,6 +167,7 @@ impl Extension {
                 config: Mutex::new(Map::new()),
                 language: Mutex::new("en".to_string()),
                 account: Mutex::new(None),
+                methods: Mutex::new(self.registry),
             }),
         };
         let hello =
@@ -250,20 +272,11 @@ impl Server {
             eprintln!("miyu-ext: provide failed: {error}");
             return;
         }
-        if !self.handlers.methods.is_empty() {
-            let methods: Vec<Value> = self
-                .handlers
-                .methods
-                .keys()
-                .map(|name| json!({"name": name}))
-                .collect();
-            if let Err(error) = self
-                .core
-                .call("package.methods", json!({"methods": methods}))
-            {
-                eprintln!("miyu-ext: package.methods failed: {error}");
-                return;
-            }
+        if !self.handlers.methods.is_empty()
+            && let Err(error) = self.core.register_methods()
+        {
+            eprintln!("miyu-ext: package.methods failed: {error}");
+            return;
         }
         for index in 0..self.handlers.ready.len() {
             let server = Arc::clone(&self);
@@ -393,7 +406,7 @@ impl Server {
                     .get(name)
                     .ok_or_else(|| not_found(method))?;
                 handler(&params["params"], params["from"].as_str(), &self.core)
-                    .map_err(|why| json!({"code": -32603, "message": why}))
+                    .map_err(MethodError::into_json)
             }
             _ => {
                 let handler = self
