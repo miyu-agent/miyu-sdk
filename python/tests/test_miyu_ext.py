@@ -113,6 +113,21 @@ class Handshake(unittest.TestCase):
         self.assertTrue(first._id_prefix.startswith("x") and first._id_prefix.endswith("-"))
         self.assertNotEqual(first._id_prefix, second._id_prefix, "a restarted extension must not reuse ids")
 
+    def test_a_tool_sees_the_persona_and_read_only(self):
+        ext = Extension("p")
+
+        @ext.tool("who", "Who.", access="read")
+        def who(args, call):
+            return f"{call.persona} {call.read_only}"
+
+        core = FakeCore(ext)
+        got = core.request("tool.call", {"session": "s1", "call_id": "c1", "tool": "who", "args": {}, "cwd": "/",
+                                         "persona": "miyu", "permission": {"level": "full", "read_only": True}})
+        self.assertEqual(got["blocks"][0]["text"], "miyu True")
+        got = core.request("tool.call", {"session": "s1", "call_id": "c2", "tool": "who", "args": {}, "cwd": "/"})
+        self.assertEqual(got["blocks"][0]["text"], "None False")
+        core.close()
+
     def test_a_protocol_mismatch_exits_with_one(self):
         for reply in ('{"jsonrpc":"2.0","id":"hello","error":{"code":-32010,"message":"no","data":{"reason":"protocol_mismatch"}}}',
                       '{"jsonrpc":"2.0","id":"hello","result":{"protocol":2}}'):

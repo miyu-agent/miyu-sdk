@@ -489,6 +489,18 @@ impl Call {
         &self.params["by"]
     }
 
+    /// The session's persona for this turn, to pick a voice or a tone by; `None` without a persona (core TC-1).
+    pub fn persona(&self) -> Option<&str> {
+        self.params["persona"].as_str()
+    }
+
+    /// Whether the session is read-only at the moment of this call (core TC-1, `permission.read_only`).
+    pub fn read_only(&self) -> bool {
+        self.params["permission"]["read_only"]
+            .as_bool()
+            .unwrap_or(false)
+    }
+
     /// Whether the call timed out or was interrupted.
     pub fn cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)

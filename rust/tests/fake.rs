@@ -250,6 +250,27 @@ fn cancel_reaches_a_running_call_and_others_are_not_held_up() {
 }
 
 #[test]
+fn a_tool_sees_the_persona_and_read_only() {
+    let mut ext = Extension::new("p", "0.0.0");
+    ext.tool(Tool::new("who", "Who."), |_, call| {
+        Reply::text(format!("{:?} {}", call.persona(), call.read_only()))
+    });
+    let core = FakeCore::start(ext, Map::new());
+    let with = core.request(
+        "tool.call",
+        json!({"session": "s1", "call_id": "c1", "tool": "who", "args": {}, "cwd": "/",
+               "persona": "miyu", "permission": {"level": "full", "read_only": true}}),
+    );
+    assert_eq!(with["blocks"][0]["text"], "Some(\"miyu\") true");
+    let without = core.request(
+        "tool.call",
+        json!({"session": "s1", "call_id": "c2", "tool": "who", "args": {}, "cwd": "/"}),
+    );
+    assert_eq!(without["blocks"][0]["text"], "None false");
+    assert_eq!(core.close(), Ok(()));
+}
+
+#[test]
 fn calling_the_core_from_a_tool() {
     let mut ext = Extension::new("t", "0.0.0");
     ext.tool(Tool::new("asks", "Calls the core."), |_, call| {
