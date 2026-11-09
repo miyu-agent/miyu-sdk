@@ -108,6 +108,11 @@ class Handshake(unittest.TestCase):
         self.assertEqual(core.request("method.call", {"method": "status", "params": {}}), {"ok": True})
         core.close()
 
+    def test_request_ids_differ_between_starts(self):
+        first, second = Extension("a"), Extension("a")
+        self.assertTrue(first._id_prefix.startswith("x") and first._id_prefix.endswith("-"))
+        self.assertNotEqual(first._id_prefix, second._id_prefix, "a restarted extension must not reuse ids")
+
     def test_a_protocol_mismatch_exits_with_one(self):
         for reply in ('{"jsonrpc":"2.0","id":"hello","error":{"code":-32010,"message":"no","data":{"reason":"protocol_mismatch"}}}',
                       '{"jsonrpc":"2.0","id":"hello","result":{"protocol":2}}'):

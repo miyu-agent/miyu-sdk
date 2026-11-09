@@ -18,6 +18,10 @@ pub(crate) struct Wire {
     out: Mutex<Box<dyn Write + Send>>,
     waiting: Mutex<HashMap<String, Sender<Answer>>>,
     next: AtomicU64,
+    /// Starts every request id: this process and when it started. The core answers a request whose id it saw before in the
+    /// same session (the last 1024) with the earlier answer and does nothing, across connections; plain `x1, x2…` would make
+    /// a restarted extension's first `session.send` calls silently replay old ones.
+    prefix: String,
 }
 
 impl Wire {
@@ -26,6 +30,7 @@ impl Wire {
             out: Mutex::new(out),
             waiting: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
+            prefix: id_prefix(),
         }
     }
 
@@ -40,7 +45,11 @@ impl Wire {
 
     /// Send a request and wait up to `wait` for its answer; no answer counts as an error.
     pub(crate) fn call(&self, method: &str, params: &Value, wait: Duration) -> Answer {
-        let id = format!("x{}", self.next.fetch_add(1, Ordering::Relaxed));
+        let id = format!(
+            "{}{}",
+            self.prefix,
+            self.next.fetch_add(1, Ordering::Relaxed)
+        );
         let (tell, answer) = mpsc::channel();
         self.waiting
             .lock()
@@ -82,4 +91,33 @@ impl Wire {
 /// JSON-RPC's "method not found" (`-32601`).
 pub(crate) fn not_found(method: &str) -> Value {
     json!({"code": -32601, "message": format!("no handler for {method}")})
+}
+
+/// `x<process id><nanoseconds since 1970>-` in hex, and a count of wires made in this process: unique across restarts.
+fn id_prefix() -> String {
+    static MADE: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    format!(
+        "x{:x}{nanos:x}{:x}-",
+        std::process::id(),
+        MADE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Wire;
+
+    #[test]
+    fn request_ids_differ_between_starts() {
+        let first = Wire::new(Box::new(std::io::sink()));
+        let second = Wire::new(Box::new(std::io::sink()));
+        assert!(first.prefix.starts_with('x') && first.prefix.ends_with('-'));
+        assert_ne!(
+            first.prefix, second.prefix,
+            "a restarted extension must not reuse ids"
+        );
+    }
 }

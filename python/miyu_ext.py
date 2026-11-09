@@ -26,6 +26,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 import traceback
 
 __version__ = "0.1.0"
@@ -224,6 +225,10 @@ class Extension:
         self._waiting = {}
         self._waiting_lock = threading.Lock()
         self._next_id = 0
+        # Starts every request id: this process and when it started. The core answers a request whose id it saw before
+        # in the same session with the earlier answer and does nothing, across connections; plain x1, x2... would make a
+        # restarted extension's first session.send calls silently replay old ones.
+        self._id_prefix = f"x{os.getpid():x}{time.time_ns():x}-"
         self._calls = {}
 
     # Registering ---------------------------------------------------------------------------------------------------
@@ -350,7 +355,7 @@ class Extension:
         answer in time. Only from handlers or threads started after `run()` began: the answer arrives through `run()`."""
         with self._waiting_lock:
             self._next_id += 1
-            request_id = f"x{self._next_id}"
+            request_id = f"{self._id_prefix}{self._next_id}"
             box = {"event": threading.Event()}
             self._waiting[request_id] = box
         self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}})
