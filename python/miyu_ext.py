@@ -163,9 +163,10 @@ class Call:
         self.cwd = params.get("cwd")
         self.by = params.get("by")
         self.owner = params.get("owner", False)
-        # The session's persona for this turn (core TC-1), None without one; and whether it is read-only right now.
+        # The session's persona for this turn (core TC-1), None without one. Whether it is read-only right now: None when
+        # the call carries no permission (outside a session, an older core); treat None as the strictest case.
         self.persona = params.get("persona")
-        self.read_only = bool((params.get("permission") or {}).get("read_only", False))
+        self.read_only = (params.get("permission") or {}).get("read_only")
         self.checked = list(params.get("checked") or [])
         self.channel = params.get("channel")
         self._cancelled = threading.Event()

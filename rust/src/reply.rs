@@ -494,11 +494,10 @@ impl Call {
         self.params["persona"].as_str()
     }
 
-    /// Whether the session is read-only at the moment of this call (core TC-1, `permission.read_only`).
-    pub fn read_only(&self) -> bool {
-        self.params["permission"]["read_only"]
-            .as_bool()
-            .unwrap_or(false)
+    /// Whether the session is read-only at the moment of this call (core TC-1, `permission.read_only`); `None` when the
+    /// call carries no permission (outside a session, an older core). Treat `None` as the strictest case, not as writable.
+    pub fn read_only(&self) -> Option<bool> {
+        self.params["permission"]["read_only"].as_bool()
     }
 
     /// Whether the call timed out or was interrupted.

@@ -101,7 +101,7 @@ The names in both kits (for the next section):
 | `.changed(path)`, `.changed(path, before=…, after=…, before_text=…, after_text=…)` | `.changed(path)`, `.changed_with(path, Change { before, after, before_text, after_text })` |
 | `.read(path, lines=(1, 20))`, `.trashed(path, trash)`, `.todos(todos, done=None)` | `.read(path, Some([1, 20]))`, `.trashed(path, trash)`, `.todos(todos, None)` |
 | `content_hash(data)` | `content_hash(&data)` |
-| `call.persona` (this turn's persona id, `None` without one), `call.read_only` (core TC-1) | `call.persona()`, `call.read_only()` |
+| `call.persona` (this turn's persona id, `None` without one), `call.read_only` (core TC-1; `None` when the call carries no permission: unknown, treat it as the strictest case, not as writable) | `call.persona()`, `call.read_only()` (`Option<bool>`) |
 | `call.checked` (a list), `call.channel` (a dict or `None`) | `call.checked()` (`Vec<&str>`), `call.channel()` (`Option<Channel>`) |
 | `call.command_env()`: the whole environment (a copy of `os.environ` plus the channel) | `call.command_env()`: only what to add, for `Command::envs` |
 | `FakeCore(ext, approved=[…], cwd=…, home=…)`, `core.channel = …` | `FakeCore::start_approved(ext, config, &[…])`, `set_cwd`, `set_home`, `set_channel` |

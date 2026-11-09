@@ -101,7 +101,7 @@ ext.run();
 | `.changed(path)`、`.changed(path, before=…, after=…, before_text=…, after_text=…)` | `.changed(path)`、`.changed_with(path, Change { before, after, before_text, after_text })` |
 | `.read(path, lines=(1, 20))`、`.trashed(path, trash)`、`.todos(todos, done=None)` | `.read(path, Some([1, 20]))`、`.trashed(path, trash)`、`.todos(todos, None)` |
 | `content_hash(data)` | `content_hash(&data)` |
-| `call.persona`（这一轮的人格编号，没有是 `None`）、`call.read_only`（核心 TC-1） | `call.persona()`、`call.read_only()` |
+| `call.persona`（这一轮的人格编号，没有是 `None`）、`call.read_only`（核心 TC-1；调用没带权限的是 `None`：不知道，照最严的算，别当成能写） | `call.persona()`、`call.read_only()`（`Option<bool>`） |
 | `call.checked`（列表）、`call.channel`（字典或 `None`） | `call.checked()`（`Vec<&str>`）、`call.channel()`（`Option<Channel>`） |
 | `call.command_env()`：整份环境（`os.environ` 的副本加上通道） | `call.command_env()`：只是要加的几项，给 `Command::envs` |
 | `FakeCore(ext, approved=[…], cwd=…, home=…)`、`core.channel = …` | `FakeCore::start_approved(ext, config, &[…])`、`set_cwd`、`set_home`、`set_channel` |

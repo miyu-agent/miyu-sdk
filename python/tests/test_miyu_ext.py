@@ -125,7 +125,7 @@ class Handshake(unittest.TestCase):
                                          "persona": "miyu", "permission": {"level": "full", "read_only": True}})
         self.assertEqual(got["blocks"][0]["text"], "miyu True")
         got = core.request("tool.call", {"session": "s1", "call_id": "c2", "tool": "who", "args": {}, "cwd": "/"})
-        self.assertEqual(got["blocks"][0]["text"], "None False")
+        self.assertEqual(got["blocks"][0]["text"], "None None", "no permission: unknown, not writable")
         core.close()
 
     def test_a_protocol_mismatch_exits_with_one(self):
