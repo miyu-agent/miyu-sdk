@@ -143,6 +143,37 @@ fn methods_carry_waits_codes_and_can_wait_to_register() {
 }
 
 #[test]
+fn a_config_handler_can_call_the_core() {
+    // 处理配置推送时调核心、等它回（照新配置重登记方法这类）：处理函数要是跑在读核心回应的线程上，回应永远读不到，
+    // 扩展就卡死了（miyu-voice 2026-11-10 端到端测出来的）。
+    let (done, finished) = std::sync::mpsc::channel();
+    let done = std::sync::Mutex::new(done);
+    let mut ext = Extension::new("cfg", "0.0.0");
+    ext.method("status", |_, _, _| Ok(json!({"ok": true})));
+    ext.on_config(move |changed, core| {
+        let answer = core.call("ping", json!({}));
+        done.lock()
+            .unwrap()
+            .send((changed.clone(), answer.map_err(|e| e.to_string())))
+            .unwrap();
+    });
+    let core = FakeCore::start(ext, Map::new());
+    core.answer("ping", |_| Ok(json!({"pong": true})));
+    core.notify("extension.config", json!({"keys": {"cfg.voice": "a"}}));
+    let (changed, answer) = finished
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the handler got its answer instead of hanging");
+    assert_eq!(changed["cfg.voice"], "a");
+    assert_eq!(answer.unwrap(), json!({"pong": true}));
+    assert_eq!(
+        core.request("method.call", json!({"method": "status", "params": {}})),
+        json!({"ok": true}),
+        "still answering"
+    );
+    assert_eq!(core.close(), Ok(()));
+}
+
+#[test]
 fn a_protocol_mismatch_is_an_error_not_a_hang() {
     for reply in [
         r#"{"jsonrpc":"2.0","id":"hello","error":{"code":-32010,"message":"no","data":{"reason":"protocol_mismatch"}}}"#,

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 use serde_json::{Map, Value, json};
 
@@ -110,7 +110,7 @@ impl Extension {
     }
 
     /// Handle any other request or notification from the core (`user.append`, `search.query`, `widget.watch`...): for a
-    /// request, what `handler` returns is the answer.
+    /// request, what `handler` returns is the answer. Notifications are handled on the same ordered thread as config pushes.
     pub fn on(
         &mut self,
         method: &str,
@@ -122,7 +122,9 @@ impl Extension {
         self
     }
 
-    /// Call `handler` after a config push with the changed keys (`null` when unset).
+    /// Call `handler` after a config push with the changed keys (`null` when unset). Handlers run on one thread of their own,
+    /// in the order the pushes came, so they may call the core; [`Core::config`] already has the new values when a request
+    /// after the push arrives.
     pub fn on_config(
         &mut self,
         handler: impl Fn(&Map<String, Value>, &Core) + Send + Sync + 'static,
@@ -179,6 +181,7 @@ impl Extension {
             handlers: self.handlers,
             calls: Mutex::new(HashMap::new()),
             core: core.clone(),
+            notices: Mutex::new(None),
         });
         let mut specs = self.specs;
         let mut shaken = false;
@@ -263,6 +266,15 @@ struct Server {
     handlers: Handlers,
     calls: Mutex<HashMap<String, Arc<AtomicBool>>>,
     core: Core,
+    /// Config pushes and other notifications go to one thread, in order: a handler may call the core and wait, which
+    /// it couldn't on the reading thread (the answer would never be read).
+    notices: Mutex<Option<mpsc::Sender<Notice>>>,
+}
+
+/// A notification for the notice thread.
+enum Notice {
+    Config(Map<String, Value>),
+    Other(String, Value),
 }
 
 impl Server {
@@ -332,7 +344,35 @@ impl Server {
         });
     }
 
-    fn notified(&self, method: &str, params: &Value) {
+    /// Hand a notification to the notice thread, starting it the first time.
+    fn queue(self: &Arc<Server>, notice: Notice) {
+        let mut sender = self.notices.lock().unwrap_or_else(PoisonError::into_inner);
+        let sender = sender.get_or_insert_with(|| {
+            let (sender, received) = mpsc::channel::<Notice>();
+            let server = Arc::clone(self);
+            std::thread::spawn(move || {
+                for notice in received {
+                    match notice {
+                        Notice::Config(changed) => {
+                            for handler in &server.handlers.config {
+                                handler(&changed, &server.core);
+                            }
+                        }
+                        Notice::Other(method, params) => {
+                            if let Some(handler) = server.handlers.on.get(&method) {
+                                handler(&params, &server.core);
+                            }
+                        }
+                    }
+                }
+            });
+            sender
+        });
+        // The thread only ends with the process.
+        sender.send(notice).unwrap_or_default();
+    }
+
+    fn notified(self: &Arc<Server>, method: &str, params: &Value) {
         match method {
             "extension.config" => {
                 let changed = params["keys"].as_object().cloned().unwrap_or_default();
@@ -350,8 +390,8 @@ impl Server {
                         };
                     }
                 }
-                for handler in &self.handlers.config {
-                    handler(&changed, &self.core);
+                if !self.handlers.config.is_empty() {
+                    self.queue(Notice::Config(changed));
                 }
             }
             "tool.cancel" => {
@@ -361,8 +401,8 @@ impl Server {
                 }
             }
             _ => {
-                if let Some(handler) = self.handlers.on.get(method) {
-                    handler(params, &self.core);
+                if self.handlers.on.contains_key(method) {
+                    self.queue(Notice::Other(method.to_string(), params.clone()));
                 }
             }
         }

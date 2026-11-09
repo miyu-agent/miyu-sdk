@@ -4,6 +4,7 @@
 """
 
 import io
+import queue
 import json
 import os
 import shutil
@@ -83,6 +84,28 @@ class Handshake(unittest.TestCase):
         self.assertEqual(refused["error"]["data"], {"code": "bad_audio"})
         ext.disable_methods(["stt.transcribe"])
         self.assertEqual(core.methods, [{"name": "status"}])
+        core.close()
+
+    def test_a_config_handler_can_call_the_core(self):
+        # A handler that calls the core and waits (re-registering methods after a config change) must not run on the
+        # reading thread, or the answer is never read (found by miyu-voice, 2026-11-10).
+        ext = Extension("cfg")
+        got = queue.Queue()
+
+        @ext.method("status")
+        def status(params, caller):
+            return {"ok": True}
+
+        @ext.on_config
+        def changed(keys):
+            got.put((keys, ext.call("ping", timeout=5.0)))
+
+        core = FakeCore(ext, answers={"ping": lambda params: {"pong": True}})
+        core.notify("extension.config", {"keys": {"cfg.voice": "a"}})
+        keys, answer = got.get(timeout=5.0)
+        self.assertEqual(keys, {"cfg.voice": "a"})
+        self.assertEqual(answer, {"pong": True})
+        self.assertEqual(core.request("method.call", {"method": "status", "params": {}}), {"ok": True})
         core.close()
 
     def test_a_protocol_mismatch_exits_with_one(self):

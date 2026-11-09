@@ -20,6 +20,7 @@ install it with pip. Apache-2.0 licensed. The protocol itself is in Miyu's `docs
 import hashlib
 import json
 import os
+import queue
 import re
 import stat
 import sys
@@ -213,6 +214,10 @@ class Extension:
         self._methods_lock = threading.Lock()
         self._handlers = {}
         self._config_handlers = []
+        # Config pushes and other notifications are handled on one thread of their own, in order: a handler may call the
+        # core and wait, which it couldn't on the reading thread (the answer would never be read).
+        self._notices = None
+        self._notices_lock = threading.Lock()
         self._ready_handlers = []
         self._out = None
         self._write_lock = threading.Lock()
@@ -326,7 +331,9 @@ class Extension:
         return register
 
     def on_config(self, function):
-        """Call `function(changed)` after a config push; `changed` maps keys to new values (`None` when unset)."""
+        """Call `function(changed)` after a config push; `changed` maps keys to new values (`None` when unset). Handlers run
+        on one thread of their own, in the order the pushes came, so they may call the core; `config` already has the new
+        values when a request after the push arrives."""
         self._config_handlers.append(function)
         return function
 
@@ -443,13 +450,28 @@ class Extension:
                 else:
                     self.config[key] = value
             for function in self._config_handlers:
-                function(changed)
+                self._queue(function, changed)
         elif method == "tool.cancel":
             call = self._calls.get(params.get("call_id"))
             if call is not None:
                 call._cancelled.set()
         elif method in self._handlers:
-            self._handlers[method](params)
+            self._queue(self._handlers[method], params)
+
+    def _queue(self, function, argument):
+        with self._notices_lock:
+            if self._notices is None:
+                self._notices = queue.Queue()
+                threading.Thread(target=self._run_notices, daemon=True).start()
+        self._notices.put((function, argument))
+
+    def _run_notices(self):
+        while True:
+            function, argument = self._notices.get()
+            try:
+                function(argument)
+            except Exception:  # a handler's bug: report it, keep handling
+                traceback.print_exc(file=sys.stderr)
 
     def _answer(self, request_id, method, params):
         try:
