@@ -68,11 +68,6 @@ impl Tool {
         self.set("subject", json!(argument))
     }
 
-    /// The model sees only the name and one line until it loads the tool.
-    pub fn need_load(self, need: bool) -> Tool {
-        self.set("need_load", json!(need))
-    }
-
     /// Scripts may call it with `miyu call` (read, network and execute tools only).
     pub fn clicall(self, open: bool) -> Tool {
         self.set("clicall", json!(open))

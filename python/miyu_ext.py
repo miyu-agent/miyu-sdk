@@ -238,8 +238,7 @@ class Extension:
     # Registering ---------------------------------------------------------------------------------------------------
 
     def tool(self, name, description, schema=None, *, access, venues=("local",), timeout_ms=None, display_name=None,
-             subject=None, need_load=None, clicall=None, feature=None, paths=None, background_parameters=None,
-             runs_commands=None):
+             subject=None, clicall=None, feature=None, paths=None, background_parameters=None, runs_commands=None):
         """Register a tool. The function gets `(args, call)` and returns a string, a `Reply` or a raw result dict.
 
         `description` and the schema are for the model: short English sentences, at most three. `access` is honest:
@@ -260,9 +259,8 @@ class Extension:
             "venues": list(venues),
         }
         for key, value in (("timeout_ms", timeout_ms), ("display_name", display_name), ("subject", subject),
-                           ("need_load", need_load), ("clicall", clicall), ("feature", feature),
-                           ("paths", paths), ("background_parameters", background_parameters),
-                           ("runs_commands", runs_commands)):
+                           ("clicall", clicall), ("feature", feature), ("paths", paths),
+                           ("background_parameters", background_parameters), ("runs_commands", runs_commands)):
             if value is not None:
                 spec[key] = value
 
