@@ -225,7 +225,7 @@ class Tools(unittest.TestCase):
 class Others(unittest.TestCase):
     def test_commands_methods_handlers_and_config(self):
         ext = Extension("o")
-        changes = []
+        changes = queue.Queue()
 
         @ext.command("weather")
         def weather(params):
@@ -239,7 +239,7 @@ class Others(unittest.TestCase):
         def inject(params):
             return {"content": [{"kind": "hint", "text": params.get("text", "")}]}
 
-        ext.on_config(changes.append)
+        ext.on_config(changes.put)
         core = FakeCore(ext, config={"o.a": 1, "o.b": 2})
         said = core.request("command.call", {"command": "weather", "argument": "today", "text": "/weather today"})
         self.assertEqual(said, {"said": "sunny today"})
@@ -250,9 +250,11 @@ class Others(unittest.TestCase):
                          {"content": [{"kind": "hint", "text": "hi"}]})
         self.assertEqual(core.request("search.query", {"query": "x"})["error"]["code"], -32601)
         core.notify("extension.config", {"keys": {"o.a": 5, "o.b": None}})
-        core.request("method.call", {"method": "status"})  # 推送照先后到：这一条回来时上一条已经办了
+        core.request("method.call", {"method": "status"})  # 推送照先后到：这一条回来时 config 已经是新值
         self.assertEqual(ext.config, {"o.a": 5})
-        self.assertEqual(changes, [{"o.a": 5, "o.b": None}])
+        # 处理函数跑在它自己的线程上（SDK-2），上面那条回来时它不一定跑完了：等它，不直接看。
+        self.assertEqual(changes.get(timeout=5.0), {"o.a": 5, "o.b": None})
+        self.assertTrue(changes.empty(), "called once")
         core.close()
 
 
