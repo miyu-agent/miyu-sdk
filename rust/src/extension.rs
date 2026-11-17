@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use serde_json::{Map, Value, json};
 
 use crate::method::{Method, MethodError, Registry};
-use crate::reply::{Call, Core, Reply, Shared, Tool};
+use crate::reply::{Call, CallLanguage, Core, Reply, Shared, Tool};
 use crate::wire::{Wire, not_found};
 use crate::{EXIT_CONFIG, PROTOCOL};
 
@@ -460,6 +460,7 @@ impl Server {
                     .methods
                     .get(name)
                     .ok_or_else(|| not_found(method))?;
+                let _language = CallLanguage::set(params["language"].as_str());
                 handler(&params["params"], params["from"].as_str(), &self.core)
                     .map_err(MethodError::into_json)
             }

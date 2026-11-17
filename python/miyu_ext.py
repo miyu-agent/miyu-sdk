@@ -166,6 +166,9 @@ class Call:
         # The session's persona for this turn (core TC-1), None without one. Whether it is read-only right now: None when
         # the call carries no permission (outside a session, an older core); treat None as the strictest case.
         self.persona = params.get("persona")
+        # In a chat venue whose platform caps a voice message: the longest one in milliseconds (the bridge reports it,
+        # the core passes it on). Longer speech won't go out as a voice message there; tell the model so. None elsewhere.
+        self.voice_max_ms = params.get("voice_max_ms")
         self.read_only = (params.get("permission") or {}).get("read_only")
         self.checked = list(params.get("checked") or [])
         self.channel = params.get("channel")
@@ -220,6 +223,7 @@ class Extension:
         self.kind = kind
         self.version = version
         self.config = {}
+        self._call = threading.local()
         self.language = "en"
         self.account = None
         self._tools = []
@@ -387,6 +391,18 @@ class Extension:
         print(message, file=sys.stderr, flush=True)
         sys.exit(EXIT_CONFIG)
 
+    @property
+    def language(self):
+        """The language for people: ``zh``, ``en`` or ``ja``. While your handler for a ``method.call`` runs, the language
+        of the connection that called it (a head's, or another package's), so a settings page or a widget gets text in
+        the language its person reads; elsewhere the language the core gave at the handshake. Only on the thread that
+        runs the handler: a thread you start in it sees the handshake's."""
+        return getattr(self._call, "language", None) or self._language
+
+    @language.setter
+    def language(self, value):
+        self._language = value
+
     # Running -------------------------------------------------------------------------------------------------------
 
     def run(self, stdin=None, stdout=None):
@@ -538,7 +554,11 @@ class Extension:
             function = self._methods.get(params.get("method"))
             if function is None:
                 raise _NotFound()
-            return function(params.get("params", {}), params.get("from"))
+            self._call.language = params.get("language")
+            try:
+                return function(params.get("params", {}), params.get("from"))
+            finally:
+                self._call.language = None
         function = self._handlers.get(method)
         if function is None:
             raise _NotFound()
@@ -584,6 +604,8 @@ class FakeCore:
         self.home = home if home is not None else os.path.expanduser("~")
         self.channel = {"sock": os.path.join(tempfile.gettempdir(), "miyu-call-fake.sock"), "token": "0" * 32,
                         "bin": os.path.join(tempfile.gettempdir(), "miyu-call-fake-bin")}
+        # The `voice_max_ms` the next calls get (a chat venue whose platform caps a voice message), or None.
+        self.voice_max_ms = None
         self.approved = None if approved is None else list(approved)
         self.answers = {"provide": self._provided, "package.methods": self._methods_listed}
         self.answers.update(answers or {})
@@ -622,6 +644,8 @@ class FakeCore:
             params["checked"] = [real for real, _ in judged]
         if spec.get("runs_commands") is True and self.channel is not None:
             params["channel"] = dict(self.channel)
+        if self.voice_max_ms is not None:
+            params["voice_max_ms"] = self.voice_max_ms
         befores = {real: _copy(real) for real, write in judged if write}
         message = self._exchange("tool.call", params, timeout)
         if "result" not in message:

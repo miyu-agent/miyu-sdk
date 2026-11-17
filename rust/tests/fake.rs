@@ -343,3 +343,41 @@ fn hello_tells_the_core_the_system_language() {
     );
     core.close().unwrap();
 }
+
+/// A method answers in the language of the connection that called it (`language` in `method.call`, core ML-1): a head
+/// in Chinese gets Chinese even though the handshake said English; a call without one falls back to the handshake's.
+/// Only for the call: afterwards `language()` is the handshake's again.
+#[test]
+fn a_method_answers_in_the_callers_language() {
+    let mut ext = Extension::new("hello", "0.1.0");
+    ext.method_with(Method::new("label"), |_, _, core| {
+        Ok(json!({"language": core.language()}))
+    });
+    let core = FakeCore::start(ext, Map::new());
+    let asked = |language: Option<&str>| {
+        let mut params = json!({"method": "label", "params": {}});
+        if let Some(language) = language {
+            params["language"] = language.into();
+        }
+        core.request("method.call", params)["language"].clone()
+    };
+    assert_eq!(asked(Some("zh")), "zh");
+    assert_eq!(asked(Some("ja")), "ja");
+    assert_eq!(asked(None), "en", "no language: the handshake's");
+    core.close().unwrap();
+}
+
+/// `voice_max_ms` reaches the tool in a chat venue that caps voice messages, and is `None` elsewhere.
+#[test]
+fn a_tool_sees_the_venues_voice_limit() {
+    let mut ext = Extension::new("hello", "0.1.0");
+    ext.tool(
+        Tool::new("speak", "Speak.").schema(json!({"type": "object", "properties": {}})),
+        |_, call| Reply::text(format!("{:?}", call.voice_max_ms())),
+    );
+    let core = FakeCore::start(ext, Map::new());
+    assert_eq!(text(&core.call_tool("speak", json!({}))), "None");
+    core.set_voice_max_ms(Some(60_000));
+    assert_eq!(text(&core.call_tool("speak", json!({}))), "Some(60000)");
+    core.close().unwrap();
+}

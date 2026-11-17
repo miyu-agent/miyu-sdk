@@ -49,6 +49,7 @@ pub struct FakeCore {
     next: AtomicU64,
     place: Mutex<Place>,
     channel: Mutex<Option<Value>>,
+    voice_max_ms: Mutex<Option<u64>>,
     effects: Mutex<Vec<Value>>,
     dropped: Mutex<Vec<Value>>,
 }
@@ -126,6 +127,7 @@ impl FakeCore {
                 home,
             }),
             channel: Mutex::new(Some(channel)),
+            voice_max_ms: Mutex::new(None),
             effects: Mutex::new(Vec::new()),
             dropped: Mutex::new(Vec::new()),
         }
@@ -146,6 +148,11 @@ impl FakeCore {
     /// serve it), or `None` for no channel.
     pub fn set_channel(&self, channel: Option<Value>) {
         *lock(&self.channel) = channel;
+    }
+
+    /// The `voice_max_ms` the next calls get (a chat venue whose platform caps a voice message), or `None` (at first).
+    pub fn set_voice_max_ms(&self, voice_max_ms: Option<u64>) {
+        *lock(&self.voice_max_ms) = voice_max_ms;
     }
 
     /// The `channel` the next calls get.
@@ -237,6 +244,9 @@ impl FakeCore {
         let place = lock(&self.place).clone();
         let cwd = place.cwd.to_string_lossy().into_owned();
         let mut params = json!({"session": "s1", "call_id": call_id, "tool": tool, "args": args, "cwd": cwd, "owner": true});
+        if let Some(voice_max_ms) = *lock(&self.voice_max_ms) {
+            params["voice_max_ms"] = voice_max_ms.into();
+        }
         let judged = match spec.get("paths").filter(|paths| !paths.is_null()) {
             Some(paths) => {
                 let judged = effects::judge(paths, &params["args"], &place);
