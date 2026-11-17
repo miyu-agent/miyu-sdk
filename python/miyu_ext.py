@@ -197,6 +197,17 @@ class Call:
         return env
 
 
+
+def _locale(env):
+    """The system language to tell the core at the handshake (``locale`` in ``hello``): the first of ``LC_ALL``,
+    ``LC_MESSAGES``, ``LANG`` that is set and not empty, the way a terminal picks its language. With ``ui.language``
+    on ``auto`` the core shows people-facing text in this language; without it the core falls back to English."""
+    for name in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        value = (env.get(name) or "").strip()
+        if value:
+            return value
+    return None
+
 class Extension:
     """An extension: register tools, commands, methods and handlers, then `run()`.
 
@@ -383,6 +394,9 @@ class Extension:
         stdin = stdin or sys.stdin
         self._out = stdout or sys.stdout
         hello = {"protocol": list(PROTOCOL), "head": {"kind": self.kind, "version": self.version}}
+        locale = _locale(os.environ)
+        if locale:
+            hello["locale"] = locale
         self._send({"jsonrpc": "2.0", "id": "hello", "method": "hello", "params": hello})
         shaken = False
         for line in stdin:

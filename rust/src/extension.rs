@@ -172,8 +172,11 @@ impl Extension {
                 methods: Mutex::new(self.registry),
             }),
         };
-        let hello =
+        let mut hello =
             json!({"protocol": PROTOCOL, "head": {"kind": self.kind, "version": self.version}});
+        if let Some(locale) = locale_from(&|name| std::env::var(name).ok()) {
+            hello["locale"] = locale.into();
+        }
         core.shared
             .wire
             .send(&json!({"jsonrpc": "2.0", "id": "hello", "method": "hello", "params": hello}));
@@ -253,6 +256,18 @@ fn shake(core: &Core, message: &Value) -> Result<(), String> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = result["account"].as_str().map(String::from);
     Ok(())
+}
+
+/// The system language to tell the core at the handshake (`locale` in `hello`): the first of `LC_ALL`, `LC_MESSAGES`,
+/// `LANG` that is set and not empty, the way a terminal picks its language. With `ui.language` on `auto` the core shows
+/// people-facing text in this language; without it the core falls back to English. `env` reads one variable.
+#[must_use]
+pub(crate) fn locale_from(env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .filter_map(env)
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
 }
 
 /// Say why and exit with code 1 (restarting won't help).
@@ -457,5 +472,38 @@ impl Server {
                 Ok(handler(params, &self.core))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::locale_from;
+
+    /// `LC_ALL` wins over `LC_MESSAGES` over `LANG`; empty ones are skipped; none at all sends nothing.
+    #[test]
+    fn locale_follows_the_terminal_order() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+            }
+        };
+        let all = env(&[
+            ("LC_ALL", "ja_JP.UTF-8"),
+            ("LC_MESSAGES", "en_US"),
+            ("LANG", "zh_CN.UTF-8"),
+        ]);
+        assert_eq!(locale_from(&all).as_deref(), Some("ja_JP.UTF-8"));
+        let messages = env(&[
+            ("LC_ALL", " "),
+            ("LC_MESSAGES", "en_US"),
+            ("LANG", "zh_CN.UTF-8"),
+        ]);
+        assert_eq!(locale_from(&messages).as_deref(), Some("en_US"));
+        let lang = env(&[("LANG", "zh_CN.UTF-8")]);
+        assert_eq!(locale_from(&lang).as_deref(), Some("zh_CN.UTF-8"));
+        assert_eq!(locale_from(&env(&[])), None);
     }
 }
