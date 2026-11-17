@@ -2,6 +2,7 @@
 //! [`Change`] for a checked file change), [`Channel`] (`miyu call` for the commands a tool runs), [`Core`] (calling the core,
 //! reading config) and [`CoreError`] (a refusal).
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -360,8 +361,14 @@ impl Core {
             .clone()
     }
 
-    /// The language for people: `zh`, `en` or `ja`.
+    /// The language for people: `zh`, `en` or `ja`. While your handler for a `method.call` runs, the language of the
+    /// connection that called it (a head's, or another package's), so a settings page or a widget gets text in the
+    /// language its person reads; elsewhere the language the core gave at the handshake. Only on the thread that runs the
+    /// handler: a thread you start in it sees the handshake's.
     pub fn language(&self) -> String {
+        if let Some(language) = CALL_LANGUAGE.with(|current| current.borrow().clone()) {
+            return language;
+        }
         self.shared
             .language
             .lock()
@@ -442,6 +449,27 @@ pub struct Channel {
     pub bin: Option<String>,
 }
 
+thread_local! {
+    /// The language of the connection whose `method.call` this thread is handling (core ML-1), for [`Core::language`].
+    static CALL_LANGUAGE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Sets the calling connection's language while it lives; dropping it (also when the handler panics) clears it.
+pub(crate) struct CallLanguage;
+
+impl CallLanguage {
+    pub(crate) fn set(language: Option<&str>) -> CallLanguage {
+        CALL_LANGUAGE.with(|current| *current.borrow_mut() = language.map(str::to_string));
+        CallLanguage
+    }
+}
+
+impl Drop for CallLanguage {
+    fn drop(&mut self) {
+        CALL_LANGUAGE.with(|current| *current.borrow_mut() = None);
+    }
+}
+
 /// One `tool.call`: the arguments are already repaired to the schema. Check [`Call::cancelled`] in long work: it turns
 /// true when the call timed out or the person interrupted.
 pub struct Call {
@@ -482,6 +510,13 @@ impl Call {
     /// Who asked, as the protocol writes it.
     pub fn by(&self) -> &Value {
         &self.params["by"]
+    }
+
+    /// In a chat venue whose platform caps a voice message: the longest one in milliseconds (`voice_max_ms`, the bridge
+    /// reports it, the core passes it on). Longer speech won't go out as a voice message there; tell the model so instead.
+    /// `None` elsewhere.
+    pub fn voice_max_ms(&self) -> Option<u64> {
+        self.params["voice_max_ms"].as_u64()
     }
 
     /// The session's persona for this turn, to pick a voice or a tone by; `None` without a persona (core TC-1).

@@ -64,6 +64,34 @@ class Handshake(unittest.TestCase):
                 self.assertEqual(core.received[0]["params"].get("locale"), want, env)
                 core.close()
 
+    def test_a_method_answers_in_the_callers_language(self):
+        # `language` in `method.call` (core ML-1): the caller's language for the call, the handshake's otherwise.
+        ext = Extension("hello", "0.1.0")
+
+        @ext.method("label")
+        def label(params, caller):
+            return {"language": ext.language}
+
+        core = FakeCore(ext, language="en")
+        self.assertEqual(core.request("method.call", {"method": "label", "params": {}, "language": "zh"}),
+                         {"language": "zh"})
+        self.assertEqual(core.request("method.call", {"method": "label", "params": {}}), {"language": "en"})
+        self.assertEqual(ext.language, "en", "back to the handshake's after the call")
+        core.close()
+
+    def test_a_tool_sees_the_venues_voice_limit(self):
+        ext = Extension("hello", "0.1.0")
+
+        @ext.tool("speak", "Speak.", SCHEMA, access="read")
+        def speak(args, call):
+            return repr(call.voice_max_ms)
+
+        core = FakeCore(ext)
+        self.assertEqual(core.call_tool("speak", {"name": "x"})["blocks"][0]["text"], "None")
+        core.voice_max_ms = 60000
+        self.assertEqual(core.call_tool("speak", {"name": "x"})["blocks"][0]["text"], "60000")
+        core.close()
+
     def test_provides_even_without_tools_and_lists_methods(self):
         ext = Extension("bare")
 
