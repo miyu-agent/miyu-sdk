@@ -48,6 +48,22 @@ class Handshake(unittest.TestCase):
         core.close()
         self.assertFalse(core.extension.is_alive(), "stdin ended, run() returned")
 
+    def test_hello_tells_the_core_the_system_language(self):
+        # The way a terminal picks its language: LC_ALL, then LC_MESSAGES, then LANG; empty ones skipped; none, none sent.
+        from unittest import mock
+        cases = [
+            ({"LC_ALL": "ja_JP.UTF-8", "LC_MESSAGES": "en_US", "LANG": "zh_CN.UTF-8"}, "ja_JP.UTF-8"),
+            ({"LC_ALL": " ", "LC_MESSAGES": "en_US", "LANG": "zh_CN.UTF-8"}, "en_US"),
+            ({"LANG": "zh_CN.UTF-8"}, "zh_CN.UTF-8"),
+            ({}, None),
+        ]
+        for env, want in cases:
+            clean = {k: v for k, v in os.environ.items() if k not in ("LC_ALL", "LC_MESSAGES", "LANG")}
+            with mock.patch.dict(os.environ, {**clean, **env}, clear=True):
+                core = FakeCore(Extension("hello", "0.1.0"))
+                self.assertEqual(core.received[0]["params"].get("locale"), want, env)
+                core.close()
+
     def test_provides_even_without_tools_and_lists_methods(self):
         ext = Extension("bare")
 

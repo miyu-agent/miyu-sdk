@@ -321,3 +321,25 @@ fn calling_the_core_from_a_tool() {
     );
     assert_eq!(core.close(), Ok(()));
 }
+
+/// The handshake tells the core the system language (`locale`), so `ui.language = "auto"` shows people-facing text in
+/// it instead of falling back to English; nothing set sends no `locale`.
+#[test]
+fn hello_tells_the_core_the_system_language() {
+    let core = FakeCore::start(Extension::new("hello", "0.1.0"), Map::new());
+    let hello = core
+        .received()
+        .into_iter()
+        .find(|message| message["method"] == "hello")
+        .expect("a hello");
+    let expected = ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty());
+    assert_eq!(
+        hello["params"]["locale"].as_str().map(str::to_string),
+        expected
+    );
+    core.close().unwrap();
+}
