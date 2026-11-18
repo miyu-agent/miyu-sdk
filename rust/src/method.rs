@@ -49,8 +49,10 @@ impl From<&str> for Method {
     }
 }
 
-/// A method's error: a message for people and, optionally, a code callers can tell apart (`bad_audio`, `mic_busy`).
-/// It goes back as a JSON-RPC error `{"code": -32000, "message", "data": {"code"}}`; without a code, `-32603`.
+/// A method's or an [`on_with`](crate::Extension::on_with) handler's error: a message for people and, optionally, a code
+/// callers can tell apart (`bad_audio`, `mic_busy`, `limited`). It goes back as a JSON-RPC error
+/// `{"code": -32000, "message", "data": {"code", "reason"}}`, the code in both (`reason` is what the core reads); without
+/// a code, `-32603`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodError {
     /// The code callers match on.
@@ -70,7 +72,10 @@ impl MethodError {
 
     pub(crate) fn into_json(self) -> Value {
         match self.code {
-            Some(code) => json!({"code": CODED, "message": self.message, "data": {"code": code}}),
+            // `code` is what callers of a method match on, `reason` what the core reads (`limited` from `search.query`).
+            Some(code) => {
+                json!({"code": CODED, "message": self.message, "data": {"code": code, "reason": code}})
+            }
             None => json!({"code": INTERNAL, "message": self.message}),
         }
     }

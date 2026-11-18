@@ -61,9 +61,15 @@ class CoreError(Exception):
         super().__init__(f"{self.reason or self.code}: {self.message}")
 
 
+# A `Reply` without a `state` writes none; `state=None` writes `null`, as given.
+_UNSET = object()
+
+
 class MethodError(Exception):
-    """Raise it from a method to answer with an error callers can tell apart: `code` (`bad_audio`, `mic_busy`) goes back
-    in the JSON-RPC error's `data.code`, `message` is for people. Any other exception goes back without a code."""
+    """Raise it from a method or an `on` handler to answer with an error callers can tell apart: `code` (`bad_audio`,
+    `mic_busy`, `limited`) goes back in the JSON-RPC error's `data`, as both `code` (what callers of a method match on)
+    and `reason` (what the core reads, such as `limited` from `search.query`); `message` is for people. Any other
+    exception goes back without a code."""
 
     def __init__(self, code, message):
         self.code = code
@@ -78,12 +84,14 @@ class Reply:
     the tool with `miyu call`; `detail` only to the interfaces (links, table or images shape); `sent` are images she sends;
     `end_turn` ends the turn after this tool. `effects` say which files the call read, changed or trashed and the to-do
     list it wrote: add them with `changed`, `read`, `trashed` and `todos`, which return the reply so they chain.
+    `state` is this package's state in the session (as `session.set_state` writes it): the core keeps the latest one per
+    session; `{}` clears it, `None` counts as not written, and with `error` the core doesn't take it. It goes back as given.
 
         return Reply(text="Edited a.txt.").changed(call.checked[0])
     """
 
     def __init__(self, text=None, blocks=None, error=False, data=None, detail=None, sent=None, end_turn=False,
-                 effects=None):
+                 effects=None, state=_UNSET):
         self.blocks = list(blocks or [])
         if text is not None:
             self.blocks.insert(0, {"type": "text", "text": text})
@@ -93,6 +101,7 @@ class Reply:
         self.sent = sent
         self.end_turn = end_turn
         self.effects = list(effects or [])
+        self.state = state
 
     def changed(self, path, before=None, after=None, before_text=None, after_text=None):
         """The file at `path` was changed or created (`file.changed`). The core reads it itself, before the call and after
@@ -143,6 +152,8 @@ class Reply:
             out["end_turn"] = True
         if self.effects:
             out["effects"] = self.effects
+        if self.state is not _UNSET:
+            out["state"] = self.state
         return out
 
 
@@ -170,7 +181,12 @@ class Call:
         # In a chat venue whose platform caps a voice message: the longest one in milliseconds (the bridge reports it,
         # the core passes it on). Longer speech won't go out as a voice message there; tell the model so. None elsewhere.
         self.voice_max_ms = params.get("voice_max_ms")
-        self.read_only = (params.get("permission") or {}).get("read_only")
+        # The permission in force when the call was sent, `{"level", "read_only"}` (`level` is `full`); None without one.
+        self.permission = params.get("permission")
+        self.read_only = (self.permission or {}).get("read_only")
+        # Local sessions only: the folder for pictures people should find (the data root's `pictures/`), a real path
+        # that may not exist yet; None in chat venues and outside a session, where pictures go in the workspace.
+        self.pictures = params.get("pictures")
         self.checked = list(params.get("checked") or [])
         self.channel = params.get("channel")
         self._cancelled = threading.Event()
@@ -257,11 +273,17 @@ class Extension:
     # Registering ---------------------------------------------------------------------------------------------------
 
     def tool(self, name, description, schema=None, *, access, venues=("local",), timeout_ms=None, display_name=None,
-             subject=None, clicall=None, feature=None, paths=None, background_parameters=None, runs_commands=None):
+             subject=None, clicall=None, feature=None, paths=None, background_parameters=None, runs_commands=None,
+             plugin=None, role=None, scope=None, result=None):
         """Register a tool. The function gets `(args, call)` and returns a string, a `Reply` or a raw result dict.
 
         `description` and the schema are for the model: short English sentences, at most three. `access` is honest:
-        `read`, `write`, `execute`, `network`, `outbound` or `venue`.
+        `read`, `write`, `execute`, `network`, `outbound`, `venue` or `install`.
+
+        `plugin` is a venue plugin: in groups and private chats the tool is there only where that plugin is on. `role`
+        tells the core what the tool is for (`read_file`). `scope` narrows the sessions within `venues`: `any`, `local`,
+        `local_main`, `local_main_attended` or `spawn`. `result` is one line showing the shape of `data` for scripts,
+        such as `{"memes":[{"id","tags"}]}`. Left out when not given.
 
         `paths` names the parameters that are file paths, `[{"parameter": "file_path", "write": True}]` (top-level string
         or string-array parameters; `write` needs `access="write"`): the core checks them like the built-in `edit`, hands
@@ -279,7 +301,8 @@ class Extension:
         }
         for key, value in (("timeout_ms", timeout_ms), ("display_name", display_name), ("subject", subject),
                            ("clicall", clicall), ("feature", feature), ("paths", paths),
-                           ("background_parameters", background_parameters), ("runs_commands", runs_commands)):
+                           ("background_parameters", background_parameters), ("runs_commands", runs_commands),
+                           ("plugin", plugin), ("role", role), ("scope", scope), ("result", result)):
             if value is not None:
                 spec[key] = value
 
@@ -292,7 +315,8 @@ class Extension:
 
     def command(self, name):
         """Handle the slash command `name` (declared in the manifest's `[[slash]]`). The function gets the `command.call`
-        params and returns the text shown to the person."""
+        params and returns the text shown to the person; `language` is the language of the connection it was typed on
+        while the function runs."""
 
         def register(function):
             self._commands[name] = function
@@ -348,7 +372,8 @@ class Extension:
 
     def on(self, method):
         """Handle any other request or notification from the core, such as `user.append`, `search.query` or
-        `widget.watch`. The function gets the params; for a request, what it returns is the answer."""
+        `widget.watch`. The function gets the params; for a request, what it returns is the answer, and a `MethodError`
+        it raises is the error (`search.query` answers `MethodError("limited", ...)` when rate limited)."""
 
         def register(function):
             self._handlers[method] = function
@@ -397,9 +422,10 @@ class Extension:
 
     @property
     def language(self):
-        """The language for people: ``zh``, ``en`` or ``ja``. While your handler for a ``method.call`` runs, the language
-        of the connection that called it (a head's, or another package's), so a settings page or a widget gets text in
-        the language its person reads; elsewhere the language the core gave at the handshake. Only on the thread that
+        """The language for people: ``zh``, ``en`` or ``ja``. While your handler for a ``method.call`` or a
+        ``command.call`` runs, the language of the connection that called it (a head's, or another package's), so a
+        settings page, a widget or a slash command gets text in the language its person reads; elsewhere the language
+        the core gave at the handshake. Only on the thread that
         runs the handler: a thread you start in it sees the handshake's."""
         return getattr(self._call, "language", None) or self._language
 
@@ -527,7 +553,8 @@ class Extension:
             return
         except MethodError as error:
             self._send({"jsonrpc": "2.0", "id": request_id,
-                        "error": {"code": _CODED_ERROR, "message": error.message, "data": {"code": error.code}}})
+                        "error": {"code": _CODED_ERROR, "message": error.message,
+                                  "data": {"code": error.code, "reason": error.code}}})
             return
         except Exception as error:  # a handler's bug: report it, keep serving
             traceback.print_exc(file=sys.stderr)
@@ -567,7 +594,11 @@ class Extension:
             function = self._commands.get(params.get("command"))
             if function is None:
                 raise _NotFound()
-            return {"said": str(function(params))}
+            self._call.language = params.get("language")
+            try:
+                return {"said": str(function(params))}
+            finally:
+                self._call.language = None
         if method == "method.call":
             function = self._methods.get(params.get("method"))
             if function is None:

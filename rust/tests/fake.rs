@@ -134,6 +134,10 @@ fn methods_carry_waits_codes_and_can_wait_to_register() {
         json!({"method": "stt.transcribe", "params": {}}),
     );
     assert_eq!(refused["error"]["data"]["code"], "bad_audio", "{refused}");
+    assert_eq!(
+        refused["error"]["data"]["reason"], "bad_audio",
+        "the same value as `reason` too"
+    );
     assert_eq!(refused["error"]["code"], -32000);
     ext_core
         .disable_methods(&["stt.transcribe"])
@@ -502,6 +506,149 @@ fn a_method_answers_in_the_callers_language() {
     assert_eq!(asked(Some("zh")), "zh");
     assert_eq!(asked(Some("ja")), "ja");
     assert_eq!(asked(None), "en", "no language: the handshake's");
+    core.close().unwrap();
+}
+
+/// `language` in `command.call` too: the language of the connection the person typed it on, for the call only.
+#[test]
+fn a_command_answers_in_the_callers_language() {
+    let mut ext = Extension::new("hello", "0.1.0");
+    ext.command("hi", |_, core| core.language());
+    let core = FakeCore::start(ext, Map::new());
+    assert_eq!(
+        core.request(
+            "command.call",
+            json!({"command": "hi", "argument": "", "language": "zh"})
+        ),
+        json!({"said": "zh"})
+    );
+    assert_eq!(
+        core.request("command.call", json!({"command": "hi", "argument": ""})),
+        json!({"said": "en"}),
+        "no language: the handshake's"
+    );
+    core.close().unwrap();
+}
+
+/// `pictures` (local sessions only) and the permission's `level` reach the tool; a call without them has `None`.
+#[test]
+fn a_tool_sees_the_pictures_folder_and_the_permission() {
+    let mut ext = Extension::new("hello", "0.1.0");
+    ext.tool(Tool::new("where", "Where."), |_, call| {
+        Reply::text(format!(
+            "{:?} {:?} {:?}",
+            call.pictures(),
+            call.permission_level(),
+            call.read_only()
+        ))
+    });
+    let core = FakeCore::start(ext, Map::new());
+    let with = core.request(
+        "tool.call",
+        json!({"session": "s1", "call_id": "c1", "tool": "where", "args": {}, "cwd": "/",
+               "pictures": "/home/me/.miyu/root/pictures", "permission": {"level": "full", "read_only": false}}),
+    );
+    assert_eq!(
+        text(&with),
+        "Some(\"/home/me/.miyu/root/pictures\") Some(\"full\") Some(false)"
+    );
+    let without = core.request(
+        "tool.call",
+        json!({"session": "s1", "call_id": "c2", "tool": "where", "args": {}, "cwd": "/"}),
+    );
+    assert_eq!(
+        text(&without),
+        "None None None",
+        "a chat venue, an older core: none"
+    );
+    core.close().unwrap();
+}
+
+/// `plugin`, `role`, `scope` and `result` go into the spec when given, and only then; `access` takes `install`.
+#[test]
+fn the_spec_carries_plugin_role_scope_and_result() {
+    let mut ext = Extension::new("hello", "0.1.0");
+    ext.tool(
+        Tool::new("t_full", "Full.")
+            .access("install")
+            .plugin("qq-admin")
+            .role("read_file")
+            .scope("local_main")
+            .result(r#"{"memes":[{"id","tags"}]}"#),
+        |_, _| Reply::text(""),
+    )
+    .tool(Tool::new("t_plain", "Plain."), |_, _| Reply::text(""));
+    let core = FakeCore::start(ext, Map::new());
+    let tools = core.tools();
+    for (key, want) in [
+        ("access", "install"),
+        ("plugin", "qq-admin"),
+        ("role", "read_file"),
+        ("scope", "local_main"),
+        ("result", r#"{"memes":[{"id","tags"}]}"#),
+    ] {
+        assert_eq!(tools[0][key], want, "{key}");
+    }
+    for key in ["plugin", "role", "scope", "result"] {
+        assert!(tools[1].get(key).is_none(), "not given, not written: {key}");
+    }
+    core.close().unwrap();
+}
+
+/// `state` (core TW-1) goes back as given: `{}` clears it, `null` the core reads as not written, and with `error` the
+/// core drops it. The kit doesn't judge any of that.
+#[test]
+fn a_result_carries_the_state_as_given() {
+    let mut ext = Extension::new("t", "0.0.0");
+    ext.tool(Tool::new("stateful", "Keeps a state."), |args, _| {
+        let reply = if args["error"] == json!(true) {
+            Reply::failed("ok")
+        } else {
+            Reply::text("ok")
+        };
+        match args.get("state") {
+            Some(state) => reply.state(state.clone()),
+            None => reply,
+        }
+    });
+    let core = FakeCore::start(ext, Map::new());
+    for state in [json!({"step": 2}), json!({}), Value::Null] {
+        assert_eq!(
+            core.call_tool("stateful", json!({"state": state})),
+            json!({"blocks": [{"type": "text", "text": "ok"}], "state": state})
+        );
+    }
+    assert_eq!(
+        core.call_tool("stateful", json!({"state": {"step": 3}, "error": true})),
+        json!({"blocks": [{"type": "text", "text": "ok"}], "error": true, "state": {"step": 3}})
+    );
+    assert!(
+        core.call_tool("stateful", json!({})).get("state").is_none(),
+        "not given, not written"
+    );
+    core.close().unwrap();
+}
+
+/// `on_with` answers a request with an error the core can read: `search.query` rate limited is `data.reason` `limited`
+/// (with the same value as `data.code`, as a method's error).
+#[test]
+fn an_on_handler_can_answer_with_a_reason() {
+    let mut ext = Extension::new("s", "0.0.0");
+    ext.on_with("search.query", |params, _| {
+        if params["query"] == "busy" {
+            return Err(MethodError::new("limited", "rate limited"));
+        }
+        Ok(json!({"hits": []}))
+    });
+    let core = FakeCore::start(ext, Map::new());
+    assert_eq!(
+        core.request("search.query", json!({"query": "busy"}))["error"],
+        json!({"code": -32000, "message": "rate limited", "data": {"code": "limited", "reason": "limited"}})
+    );
+    assert_eq!(
+        core.request("search.query", json!({"query": "x"})),
+        json!({"hits": []})
+    );
     core.close().unwrap();
 }
 

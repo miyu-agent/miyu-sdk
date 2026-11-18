@@ -41,13 +41,14 @@ if __name__ == "__main__":
 | 写什么 | 做什么 |
 |---|---|
 | `@ext.tool(name, description, schema, access=…)` | 一件工具：函数收 `(args, call)`，交回字、`Reply` 或者完整的回答。`call.cancelled` 是超时、人打断了没有 |
-| `Reply(text, error, data, detail, sent, end_turn)` | 完整的回答：`data` 只给 AI 在命令里用 `miyu call` 调到它的脚本（一行 JSON），`detail` 只给头画卡片，`sent` 是她发出去的图，`end_turn` 这一轮到此为止 |
+| `Reply(text, error, data, detail, sent, end_turn, state)` | 完整的回答：`data` 只给 AI 在命令里用 `miyu call` 调到它的脚本（一行 JSON），`detail` 只给头画卡片，`sent` 是她发出去的图，`end_turn` 这一轮到此为止，`state` 是这个包在这个会话里的一份状态（`{}` 清掉，`None` 当没写，出错的回答核心不收；照原样交） |
 | `@ext.tool(…, paths=…, background_parameters=…, runs_commands=…)` | 规格多的三格：哪几个参数是路径（`[{"parameter": "file_path", "write": True}]`）、只在会话能放后台时才给的参数、这件工具会跑命令。见下面「改文件、跑命令的工具」 |
+| `@ext.tool(…, plugin=…, role=…, scope=…, result=…)` | 规格另几格，不给的不写：场所插件（群、私聊里那个插件开着才给）、职能（`read_file`）、在 `venues` 之内再收窄的会话（`any`、`local`、`local_main`、`local_main_attended`、`spawn`）、`data` 的样子（一行字）。`access` 另有 `install` |
 | `Reply(…).changed(path)`、`.read(path, lines)`、`.trashed(path, trash)`、`.todos(todos, done)` | 回答里的 `effects`：改了、读了、删进回收站的文件，换上的待办。`changed` 可以带 `before`、`after`（`content_hash(…)`）或 `before_text`、`after_text` 多核对一层 |
 | `call.checked`、`call.channel`、`call.command_env()` | 核心判过的真实路径（声明了 `paths` 的）；`miyu call` 的通道（声明了 `runs_commands` 的）和设好通道的子进程环境 |
-| `@ext.command(name)` | 清单 `[[slash]]` 里的一条斜杠命令：交回给人看的那段话 |
-| `@ext.method(name, timeout_ms=None, later=False)` | 后台页、界面块的按钮、头、别的包（照总线的名字或者包编号）调的方法：函数收 `(params, caller)`；抛 `MethodError(code, message)` 回带码的错（码在错误的 `data.code`）；`timeout_ms` 是核心等多久（1000 到 600000，默认 30 秒）；`later=True` 先不登记，等 `ext.enable_methods([...])`（比如模型下好了），`ext.disable_methods([...])` 撤掉 |
-| `@ext.on(method)` | 别的反向调用、推送：`user.append`、`search.query`、`widget.watch`…… |
+| `@ext.command(name)` | 清单 `[[slash]]` 里的一条斜杠命令：交回给人看的那段话；函数跑着的时候 `ext.language` 是打命令的那个连接的语言 |
+| `@ext.method(name, timeout_ms=None, later=False)` | 后台页、界面块的按钮、头、别的包（照总线的名字或者包编号）调的方法：函数收 `(params, caller)`；抛 `MethodError(code, message)` 回带码的错（码在错误的 `data.code`，`data.reason` 也是它）；`timeout_ms` 是核心等多久（1000 到 600000，默认 30 秒）；`later=True` 先不登记，等 `ext.enable_methods([...])`（比如模型下好了），`ext.disable_methods([...])` 撤掉 |
+| `@ext.on(method)` | 别的反向调用、推送：`user.append`、`search.query`、`widget.watch`……；抛 `MethodError(code, message)` 回带码的错，核心读 `data.reason`（`search.query` 限额了回 `limited`） |
 | `@ext.on_config`、`ext.config` | 配置推送；握手时的配置在 `ext.config` |
 | `@ext.ready` | 握手、登记完以后在自己的线程里跑一次 |
 | `ext.call(method, params)` | 调核心的方法（`blob.put`、`model.call`……）；被拒的抛 `CoreError`，`reason` 是原因码 |
@@ -98,10 +99,14 @@ ext.run();
 |---|---|
 | `@ext.tool(…, paths=[…], background_parameters=[…], runs_commands=True)` | `Tool::paths(json!([…]))`、`.background_parameters(&[…])`、`.runs_commands(true)` |
 | `Reply(effects=[…])` | `Reply::effects(vec![…])` |
+| `@ext.tool(…, plugin=…, role=…, scope=…, result=…)` | `Tool::plugin(…)`、`.role(…)`、`.scope(…)`、`.result(…)` |
+| `Reply(state=…)` | `Reply::state(json!(…))` |
+| `@ext.on(method)` 里 `raise MethodError(code, message)` | `ext.on_with(method, …)` 回 `Err(MethodError::new(code, message))`（不回错的 `ext.on` 照旧） |
 | `.changed(path)`、`.changed(path, before=…, after=…, before_text=…, after_text=…)` | `.changed(path)`、`.changed_with(path, Change { before, after, before_text, after_text })` |
 | `.read(path, lines=(1, 20))`、`.trashed(path, trash)`、`.todos(todos, done=None)` | `.read(path, Some([1, 20]))`、`.trashed(path, trash)`、`.todos(todos, None)` |
 | `content_hash(data)` | `content_hash(&data)` |
 | `call.persona`（这一轮的人格编号，没有是 `None`）、`call.read_only`（核心 TC-1；调用没带权限的是 `None`：不知道，照最严的算，别当成能写） | `call.persona()`、`call.read_only()`（`Option<bool>`） |
+| `call.pictures`（放图的目录，只给本机的会话，没有是 `None`）、`call.permission`（整格 `{"level", "read_only"}`，没有是 `None`） | `call.pictures()`、`call.permission_level()`（都是 `Option<&str>`） |
 | `call.checked`（列表）、`call.channel`（字典或 `None`） | `call.checked()`（`Vec<&str>`）、`call.channel()`（`Option<Channel>`） |
 | `call.command_env()`：整份环境（`os.environ` 的副本加上通道） | `call.command_env()`：只是要加的几项，给 `Command::envs` |
 | `FakeCore(ext, approved=[…], cwd=…, home=…)`、`core.channel = …` | `FakeCore::start_approved(ext, config, &[…])`、`set_cwd`、`set_home`、`set_channel` |

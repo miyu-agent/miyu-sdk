@@ -18,7 +18,7 @@ type ToolFn = Box<dyn Fn(&Value, &Call) -> Reply + Send + Sync>;
 type CommandFn = Box<dyn Fn(&Value, &Core) -> String + Send + Sync>;
 type MethodFn =
     Box<dyn Fn(&Value, Option<&str>, &Core) -> Result<Value, MethodError> + Send + Sync>;
-type OnFn = Box<dyn Fn(&Value, &Core) -> Value + Send + Sync>;
+type OnFn = Box<dyn Fn(&Value, &Core) -> Result<Value, MethodError> + Send + Sync>;
 type ConfigFn = Box<dyn Fn(&Map<String, Value>, &Core) + Send + Sync>;
 type ReadyFn = Box<dyn Fn(&Core) + Send + Sync>;
 
@@ -95,7 +95,7 @@ impl Extension {
 
     /// Same as [`Extension::method`] for a [`Method`] (a bus name's methods are written in full, `stt.transcribe`): with
     /// how long the core waits, maybe registered [later](Method::later); an `Err` with a [`MethodError::code`] goes back
-    /// with the code in the error's `data.code`, so callers can tell `bad_audio` from `mic_busy`.
+    /// with the code in the error's `data.code` (and `data.reason`), so callers can tell `bad_audio` from `mic_busy`.
     pub fn method_with(
         &mut self,
         method: Method,
@@ -111,10 +111,23 @@ impl Extension {
 
     /// Handle any other request or notification from the core (`user.append`, `search.query`, `widget.watch`...): for a
     /// request, what `handler` returns is the answer. Notifications are handled on the same ordered thread as config pushes.
+    /// To answer with an error, use [`Extension::on_with`].
     pub fn on(
         &mut self,
         method: &str,
         handler: impl Fn(&Value, &Core) -> Value + Send + Sync + 'static,
+    ) -> &mut Extension {
+        self.on_with(method, move |params, core| Ok(handler(params, core)))
+    }
+
+    /// Same as [`Extension::on`], answering a request with an error when `handler` returns `Err`: a
+    /// [`MethodError::code`] goes into the error's `data` as both `code` and `reason`, so the core can read it
+    /// (`search.query` rate limited answers `MethodError::new("limited", …)`). For a notification an `Err` only goes to
+    /// stderr.
+    pub fn on_with(
+        &mut self,
+        method: &str,
+        handler: impl Fn(&Value, &Core) -> Result<Value, MethodError> + Send + Sync + 'static,
     ) -> &mut Extension {
         self.handlers
             .on
@@ -389,8 +402,10 @@ impl Server {
                             }
                         }
                         Notice::Other(method, params) => {
-                            if let Some(handler) = server.handlers.on.get(&method) {
-                                handler(&params, &server.core);
+                            if let Some(handler) = server.handlers.on.get(&method)
+                                && let Err(error) = handler(&params, &server.core)
+                            {
+                                eprintln!("miyu-ext: {method}: {}", error.message);
                             }
                         }
                     }
@@ -466,6 +481,7 @@ impl Server {
                     .commands
                     .get(command)
                     .ok_or_else(|| not_found(method))?;
+                let _language = CallLanguage::set(params["language"].as_str());
                 Ok(json!({"said": handler(params, &self.core)}))
             }
             "method.call" => {
@@ -485,7 +501,7 @@ impl Server {
                     .on
                     .get(method)
                     .ok_or_else(|| not_found(method))?;
-                Ok(handler(params, &self.core))
+                handler(params, &self.core).map_err(MethodError::into_json)
             }
         }
     }

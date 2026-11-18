@@ -41,13 +41,14 @@ One file for all three platforms: Linux and macOS start it by its `#!` line (the
 | Write | Does |
 |---|---|
 | `@ext.tool(name, description, schema, access=…)` | A tool: the function gets `(args, call)` and returns text, a `Reply` or a full answer. `call.cancelled` says whether it timed out or the person interrupted |
-| `Reply(text, error, data, detail, sent, end_turn)` | A full answer: `data` goes only to scripts that call the tool with `miyu call` (one line of JSON), `detail` only to heads for cards, `sent` are images she sends, `end_turn` ends the turn here |
+| `Reply(text, error, data, detail, sent, end_turn, state)` | A full answer: `data` goes only to scripts that call the tool with `miyu call` (one line of JSON), `detail` only to heads for cards, `sent` are images she sends, `end_turn` ends the turn here, `state` is this package's state in the session (`{}` clears it, `None` counts as not written, the core doesn't take it from a failed answer; it goes back as given) |
 | `@ext.tool(…, paths=…, background_parameters=…, runs_commands=…)` | Three more spec settings: which parameters are paths (`[{"parameter": "file_path", "write": True}]`), parameters only given when the session can run things in the background, and that the tool runs commands. See "Tools that edit files or run commands" below |
+| `@ext.tool(…, plugin=…, role=…, scope=…, result=…)` | More spec settings, left out when not given: a venue plugin (in groups and private chats only where it is on), what the tool is for (`read_file`), the sessions within `venues` (`any`, `local`, `local_main`, `local_main_attended`, `spawn`), and the shape of `data` (one line). `access` can also be `install` |
 | `Reply(…).changed(path)`, `.read(path, lines)`, `.trashed(path, trash)`, `.todos(todos, done)` | The answer's `effects`: files changed, read or moved to the trash, and the to-do list it wrote. `changed` can carry `before`, `after` (`content_hash(…)`) or `before_text`, `after_text` as an extra check |
 | `call.checked`, `call.channel`, `call.command_env()` | The real paths the core's check allowed (tools declaring `paths`); the `miyu call` channel (tools declaring `runs_commands`) and an environment for child processes with it set |
-| `@ext.command(name)` | A slash command from the manifest's `[[slash]]`: return the text shown to the person |
-| `@ext.method(name, timeout_ms=None, later=False)` | A method called by your page, a widget button, a head or another package (by bus name or package id): the function gets `(params, caller)`; raise `MethodError(code, message)` for an error with a code (it goes in the error's `data.code`); `timeout_ms` is how long the core waits (1000 to 600000, 30 seconds by default); `later=True` leaves it unregistered until `ext.enable_methods([...])` (say, once a model has downloaded), and `ext.disable_methods([...])` takes it back |
-| `@ext.on(method)` | Other calls and pushes from the core: `user.append`, `search.query`, `widget.watch`… |
+| `@ext.command(name)` | A slash command from the manifest's `[[slash]]`: return the text shown to the person; while the function runs, `ext.language` is the language of the connection it was typed on |
+| `@ext.method(name, timeout_ms=None, later=False)` | A method called by your page, a widget button, a head or another package (by bus name or package id): the function gets `(params, caller)`; raise `MethodError(code, message)` for an error with a code (it goes in the error's `data.code`, and `data.reason` too); `timeout_ms` is how long the core waits (1000 to 600000, 30 seconds by default); `later=True` leaves it unregistered until `ext.enable_methods([...])` (say, once a model has downloaded), and `ext.disable_methods([...])` takes it back |
+| `@ext.on(method)` | Other calls and pushes from the core: `user.append`, `search.query`, `widget.watch`…; raise `MethodError(code, message)` for an error with a code, which the core reads as `data.reason` (`search.query` answers `limited` when rate limited) |
 | `@ext.on_config`, `ext.config` | Config pushes; the handshake's config is in `ext.config` |
 | `@ext.ready` | Runs once on its own thread after the handshake and registration |
 | `ext.call(method, params)` | Calls a core method (`blob.put`, `model.call`…); a refusal raises `CoreError` with the code in `reason` |
@@ -98,10 +99,14 @@ The names in both kits (for the next section):
 |---|---|
 | `@ext.tool(…, paths=[…], background_parameters=[…], runs_commands=True)` | `Tool::paths(json!([…]))`, `.background_parameters(&[…])`, `.runs_commands(true)` |
 | `Reply(effects=[…])` | `Reply::effects(vec![…])` |
+| `@ext.tool(…, plugin=…, role=…, scope=…, result=…)` | `Tool::plugin(…)`, `.role(…)`, `.scope(…)`, `.result(…)` |
+| `Reply(state=…)` | `Reply::state(json!(…))` |
+| `raise MethodError(code, message)` in `@ext.on(method)` | `ext.on_with(method, …)` returning `Err(MethodError::new(code, message))` (`ext.on` without errors works as before) |
 | `.changed(path)`, `.changed(path, before=…, after=…, before_text=…, after_text=…)` | `.changed(path)`, `.changed_with(path, Change { before, after, before_text, after_text })` |
 | `.read(path, lines=(1, 20))`, `.trashed(path, trash)`, `.todos(todos, done=None)` | `.read(path, Some([1, 20]))`, `.trashed(path, trash)`, `.todos(todos, None)` |
 | `content_hash(data)` | `content_hash(&data)` |
 | `call.persona` (this turn's persona id, `None` without one), `call.read_only` (core TC-1; `None` when the call carries no permission: unknown, treat it as the strictest case, not as writable) | `call.persona()`, `call.read_only()` (`Option<bool>`) |
+| `call.pictures` (the folder for pictures, local sessions only, `None` otherwise), `call.permission` (the whole `{"level", "read_only"}`, `None` without one) | `call.pictures()`, `call.permission_level()` (both `Option<&str>`) |
 | `call.checked` (a list), `call.channel` (a dict or `None`) | `call.checked()` (`Vec<&str>`), `call.channel()` (`Option<Channel>`) |
 | `call.command_env()`: the whole environment (a copy of `os.environ` plus the channel) | `call.command_env()`: only what to add, for `Command::envs` |
 | `FakeCore(ext, approved=[…], cwd=…, home=…)`, `core.channel = …` | `FakeCore::start_approved(ext, config, &[…])`, `set_cwd`, `set_home`, `set_channel` |
