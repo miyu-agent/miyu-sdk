@@ -14,7 +14,7 @@ use crate::method::Registry;
 use crate::wire::Wire;
 
 /// A tool's spec, as `provide` sends it. `description` and the schema are for the model: short English sentences, at
-/// most three. Set `access` honestly: `read`, `write`, `execute`, `network`, `outbound` or `venue`.
+/// most three. Set `access` honestly: `read`, `write`, `execute`, `network`, `outbound`, `venue` or `install`.
 #[derive(Debug, Clone)]
 pub struct Tool {
     pub(crate) spec: Value,
@@ -44,7 +44,7 @@ impl Tool {
         self.set("input_schema", schema)
     }
 
-    /// What it touches: `read`, `write`, `execute`, `network`, `outbound` or `venue`.
+    /// What it touches: `read`, `write`, `execute`, `network`, `outbound`, `venue` or `install`.
     pub fn access(self, access: &str) -> Tool {
         self.set("access", json!(access))
     }
@@ -96,6 +96,26 @@ impl Tool {
     pub fn runs_commands(self, runs: bool) -> Tool {
         self.set("runs_commands", json!(runs))
     }
+
+    /// A venue plugin: in groups and private chats the tool is there only where that plugin is on.
+    pub fn plugin(self, plugin: &str) -> Tool {
+        self.set("plugin", json!(plugin))
+    }
+
+    /// What the tool is for, as the core tells it apart: `read_file`.
+    pub fn role(self, role: &str) -> Tool {
+        self.set("role", json!(role))
+    }
+
+    /// Which sessions get it, within [`Tool::venues`]: `any`, `local`, `local_main`, `local_main_attended` or `spawn`.
+    pub fn scope(self, scope: &str) -> Tool {
+        self.set("scope", json!(scope))
+    }
+
+    /// The shape of the reply's `data` for scripts, one line: `{"memes":[{"id","tags"}]}`.
+    pub fn result(self, shape: &str) -> Tool {
+        self.set("result", json!(shape))
+    }
 }
 
 /// The extra checks [`Reply::changed_with`] can carry: content hashes ([`crate::content_hash`]) or the texts before and
@@ -115,7 +135,8 @@ pub struct Change {
 /// A tool's result. `blocks` are what the model sees; `error` marks a failure (explain it in the text); `data` goes only
 /// to scripts calling the tool with `miyu call`; `detail` only to the interfaces; `sent` are images she sends;
 /// `end_turn` ends the turn after this tool. `effects` say which files the call read, changed or trashed and the to-do
-/// list it wrote: [`Reply::changed`], [`Reply::read`], [`Reply::trashed`], [`Reply::todos`].
+/// list it wrote: [`Reply::changed`], [`Reply::read`], [`Reply::trashed`], [`Reply::todos`]. [`Reply::state`] is this
+/// package's state in the session.
 ///
 /// ```
 /// # use miyu_ext::Reply;
@@ -130,6 +151,7 @@ pub struct Reply {
     sent: Option<Value>,
     end_turn: bool,
     effects: Vec<Value>,
+    state: Option<Value>,
 }
 
 impl Reply {
@@ -175,6 +197,13 @@ impl Reply {
     /// End the turn after this tool.
     pub fn end_turn(mut self) -> Reply {
         self.end_turn = true;
+        self
+    }
+
+    /// This package's state in the session (as `session.set_state` writes it): the core keeps the latest one per session.
+    /// `{}` clears it, `null` counts as not written, and with an error the core doesn't take it. It goes back as given.
+    pub fn state(mut self, state: Value) -> Reply {
+        self.state = Some(state);
         self
     }
 
@@ -257,6 +286,9 @@ impl Reply {
         }
         if !self.effects.is_empty() {
             out["effects"] = Value::Array(self.effects);
+        }
+        if let Some(state) = self.state {
+            out["state"] = state;
         }
         out
     }
@@ -361,9 +393,9 @@ impl Core {
             .clone()
     }
 
-    /// The language for people: `zh`, `en` or `ja`. While your handler for a `method.call` runs, the language of the
-    /// connection that called it (a head's, or another package's), so a settings page or a widget gets text in the
-    /// language its person reads; elsewhere the language the core gave at the handshake. Only on the thread that runs the
+    /// The language for people: `zh`, `en` or `ja`. While your handler for a `method.call` or a `command.call` runs, the
+    /// language of the connection that called it (a head's, or another package's), so a settings page, a widget or a
+    /// slash command gets text in the language its person reads; elsewhere the language the core gave at the handshake. Only on the thread that runs the
     /// handler: a thread you start in it sees the handshake's.
     pub fn language(&self) -> String {
         if let Some(language) = CALL_LANGUAGE.with(|current| current.borrow().clone()) {
@@ -450,7 +482,8 @@ pub struct Channel {
 }
 
 thread_local! {
-    /// The language of the connection whose `method.call` this thread is handling (core ML-1), for [`Core::language`].
+    /// The language of the connection whose `method.call` or `command.call` this thread is handling (core ML-1), for
+    /// [`Core::language`].
     static CALL_LANGUAGE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
@@ -528,6 +561,18 @@ impl Call {
     /// call carries no permission (outside a session, an older core). Treat `None` as the strictest case, not as writable.
     pub fn read_only(&self) -> Option<bool> {
         self.params["permission"]["read_only"].as_bool()
+    }
+
+    /// The level of the permission in force when the call was sent (`permission.level`, `full`); `None` when the call
+    /// carries no permission.
+    pub fn permission_level(&self) -> Option<&str> {
+        self.params["permission"]["level"].as_str()
+    }
+
+    /// Local sessions only: the folder for pictures people should find (the data root's `pictures/`), a real path that
+    /// may not exist yet. `None` in chat venues and outside a session, where pictures go in the workspace.
+    pub fn pictures(&self) -> Option<&str> {
+        self.params["pictures"].as_str()
     }
 
     /// Whether the call timed out or was interrupted.

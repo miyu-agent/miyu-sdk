@@ -28,7 +28,7 @@ fn later_methods_wait_and_timeouts_are_sent() {
 fn errors_carry_their_code_in_data() {
     assert_eq!(
         MethodError::new("bad_audio", "Not a WAV file.").into_json(),
-        json!({"code": -32000, "message": "Not a WAV file.", "data": {"code": "bad_audio"}})
+        json!({"code": -32000, "message": "Not a WAV file.", "data": {"code": "bad_audio", "reason": "bad_audio"}})
     );
     assert_eq!(
         MethodError::from("broke").into_json(),

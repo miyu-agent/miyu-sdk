@@ -79,6 +79,38 @@ class Handshake(unittest.TestCase):
         self.assertEqual(ext.language, "en", "back to the handshake's after the call")
         core.close()
 
+    def test_a_command_answers_in_the_callers_language(self):
+        # `language` in `command.call` too: the language of the connection the person typed it on.
+        ext = Extension("hello", "0.1.0")
+
+        @ext.command("hi")
+        def hi(params):
+            return ext.language
+
+        core = FakeCore(ext, language="en")
+        self.assertEqual(core.request("command.call", {"command": "hi", "argument": "", "language": "zh"}),
+                         {"said": "zh"})
+        self.assertEqual(core.request("command.call", {"command": "hi", "argument": ""}), {"said": "en"})
+        self.assertEqual(ext.language, "en", "back to the handshake's after the call")
+        core.close()
+
+    def test_a_tool_sees_the_pictures_folder_and_the_permission(self):
+        ext = Extension("hello", "0.1.0")
+
+        @ext.tool("where", "Where.", SCHEMA, access="read")
+        def where(args, call):
+            return json.dumps([call.pictures, call.permission, call.read_only])
+
+        core = FakeCore(ext)
+        got = core.request("tool.call", {"session": "s1", "call_id": "c1", "tool": "where", "args": {}, "cwd": "/",
+                                         "pictures": "/home/me/.miyu/root/pictures",
+                                         "permission": {"level": "full", "read_only": False}})
+        self.assertEqual(json.loads(text_of(got)),
+                         ["/home/me/.miyu/root/pictures", {"level": "full", "read_only": False}, False])
+        got = core.request("tool.call", {"session": "s1", "call_id": "c2", "tool": "where", "args": {}, "cwd": "/"})
+        self.assertEqual(json.loads(text_of(got)), [None, None, None], "a chat venue, an older core: none")
+        core.close()
+
     def test_a_tool_sees_the_venues_voice_limit(self):
         ext = Extension("hello", "0.1.0")
 
@@ -90,6 +122,20 @@ class Handshake(unittest.TestCase):
         self.assertEqual(core.call_tool("speak", {"name": "x"})["blocks"][0]["text"], "None")
         core.voice_max_ms = 60000
         self.assertEqual(core.call_tool("speak", {"name": "x"})["blocks"][0]["text"], "60000")
+        core.close()
+
+    def test_the_spec_carries_plugin_role_scope_and_result(self):
+        ext = Extension("hello", "0.1.0")
+        ext.tool("t_full", "Full.", access="install", plugin="qq-admin", role="read_file", scope="local_main",
+                 result='{"memes":[{"id","tags"}]}')(lambda args, call: "")
+        ext.tool("t_plain", "Plain.", access="read")(lambda args, call: "")
+        core = FakeCore(ext)
+        full, plain = core.tools
+        self.assertEqual({key: full.get(key) for key in ("access", "plugin", "role", "scope", "result")},
+                         {"access": "install", "plugin": "qq-admin", "role": "read_file", "scope": "local_main",
+                          "result": '{"memes":[{"id","tags"}]}'})
+        self.assertEqual([key for key in ("plugin", "role", "scope", "result") if key in plain], [],
+                         "not given, not written")
         core.close()
 
     def test_provides_even_without_tools_and_lists_methods(self):
@@ -125,7 +171,7 @@ class Handshake(unittest.TestCase):
         self.assertEqual(core.methods, [{"name": "status"}, {"name": "stt.transcribe", "timeout_ms": 120000}])
         refused = core.request("method.call", {"method": "stt.transcribe", "params": {}})
         self.assertEqual(refused["error"]["code"], -32000)
-        self.assertEqual(refused["error"]["data"], {"code": "bad_audio"})
+        self.assertEqual(refused["error"]["data"], {"code": "bad_audio", "reason": "bad_audio"})
         ext.disable_methods(["stt.transcribe"])
         self.assertEqual(core.methods, [{"name": "status"}])
         core.close()
@@ -197,6 +243,12 @@ class Tools(unittest.TestCase):
         def full(args, call):
             return Reply(text="found 2", data={"hits": [1, 2]}, detail={"kind": "links", "links": []})
 
+        @ext.tool("stateful", "Keeps a state.", access="read")
+        def stateful(args, call):
+            if "state" not in args:
+                return Reply(text="ok")
+            return Reply(text="ok", error=args.get("error", False), state=args["state"])
+
         @ext.tool("broken", "Breaks.", access="read")
         def broken(args, call):
             raise ValueError("bad input")
@@ -251,6 +303,16 @@ class Tools(unittest.TestCase):
             "blocks": [{"type": "text", "text": "found 2"}], "data": {"hits": [1, 2]},
             "detail": {"kind": "links", "links": []},
         })
+
+    def test_a_result_carries_the_state_as_given(self):
+        # `state` (core TW-1) goes back as written: `{}` clears it, `null` the core reads as not written, and with
+        # `error` the core drops it. The kit doesn't judge any of that.
+        for state in ({"step": 2}, {}, None):
+            self.assertEqual(self.core.call_tool("stateful", {"state": state}),
+                             {"blocks": [{"type": "text", "text": "ok"}], "state": state})
+        self.assertEqual(self.core.call_tool("stateful", {"state": {"step": 3}, "error": True}),
+                         {"blocks": [{"type": "text", "text": "ok"}], "error": True, "state": {"step": 3}})
+        self.assertNotIn("state", self.core.call_tool("stateful"), "not given, not written")
 
     def test_a_crash_is_a_failed_result_not_a_dead_extension(self):
         with redirect_stderr():
@@ -344,6 +406,10 @@ class Others(unittest.TestCase):
         def status(params, caller):
             return {"caller": caller, "params": params}
 
+        @ext.on("schedule.fired")
+        def limited(params):
+            raise MethodError("limited", "rate limited")
+
         @ext.on("user.append")
         def inject(params):
             return {"content": [{"kind": "hint", "text": params.get("text", "")}]}
@@ -358,6 +424,9 @@ class Others(unittest.TestCase):
         self.assertEqual(core.request("user.append", {"session": "s1", "venue": "local", "text": "hi"}),
                          {"content": [{"kind": "hint", "text": "hi"}]})
         self.assertEqual(core.request("search.query", {"query": "x"})["error"]["code"], -32601)
+        self.assertEqual(core.request("schedule.fired", {"id": "x"})["error"],
+                         {"code": -32000, "message": "rate limited", "data": {"code": "limited", "reason": "limited"}},
+                         "a MethodError from an `on` handler: the core reads `data.reason`, callers `data.code`")
         core.notify("extension.config", {"keys": {"o.a": 5, "o.b": None}})
         core.request("method.call", {"method": "status"})  # 推送照先后到：这一条回来时 config 已经是新值
         self.assertEqual(ext.config, {"o.a": 5})
