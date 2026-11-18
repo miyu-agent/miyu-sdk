@@ -187,6 +187,7 @@ class Tools(unittest.TestCase):
         self.ext = Extension("t")
         ext = self.ext
         self.release = threading.Event()
+        self.started = threading.Event()
 
         @ext.tool("plain", "Text.", access="read")
         def plain(args, call):
@@ -207,9 +208,25 @@ class Tools(unittest.TestCase):
 
         @ext.tool("patient", "Stops when cancelled.", access="read")
         def patient(args, call):
+            self.started.set()
             while not call.cancelled:
                 self.release.wait(0.01)
             return "stopped"
+
+        self.entered = threading.Event()
+        self.calls = []
+
+        @ext.tool("careful", "Quick, or waits to be cancelled.", access="read")
+        def careful(args, call):
+            self.calls.append(call)
+            if args.get("quick"):
+                return call.session
+            self.entered.set()
+            for _ in range(200):
+                if call.cancelled:
+                    return f"{call.session} cancelled"
+                self.release.wait(0.01)
+            return f"{call.session} not cancelled"
 
         @ext.tool("asks", "Calls the core.", access="read")
         def asks(args, call):
@@ -255,9 +272,57 @@ class Tools(unittest.TestCase):
         answer = {}
         waiting = threading.Thread(target=lambda: answer.update(self.core.call_tool("patient", call_id="c-p")))
         waiting.start()
+        # As the core: a cancel is only sent for a call already sent (one sent before it would cancel nothing).
+        self.assertTrue(self.started.wait(5), "the call started")
         self.core.notify("tool.cancel", {"session": "s1", "call_id": "c-p"})
         waiting.join(5)
         self.assertEqual(text_of(answer), "stopped")
+
+    def careful_in(self, session, call_id):
+        """Start a waiting `careful` call in `session` on a thread; returns the thread and where its answer lands."""
+        answer = {}
+        waiting = threading.Thread(target=lambda: answer.update(
+            self.core.call_tool("careful", session=session, call_id=call_id)))
+        self.entered.clear()
+        waiting.start()
+        self.assertTrue(self.entered.wait(5), "the waiting call started")
+        return waiting, answer
+
+    def test_the_same_call_id_in_two_sessions_is_two_calls(self):
+        # The core numbers calls per session (call_<seq>_<n>), so two sessions can have call_5_1 in flight at once.
+        waiting, answer = self.careful_in("s1", "call_5_1")
+        self.assertEqual(text_of(self.core.call_tool("careful", {"quick": True}, session="s2", call_id="call_5_1")),
+                         "s2", "the other session's call gets its own call object")
+        self.core.notify("tool.cancel", {"session": "s2", "call_id": "call_5_1"})
+        self.assertEqual(text_of(self.core.call_tool("plain", {"n": 1})), "got 1", "the cancel above is handled by now")
+        self.assertFalse(self.calls[0].cancelled, "cancelling s2's call_5_1 leaves s1's alone")
+        self.core.notify("tool.cancel", {"session": "s1", "call_id": "call_5_1"})
+        waiting.join(5)
+        self.assertEqual(text_of(answer), "s1 cancelled", "s2's call ending didn't drop s1's from the calls in flight")
+
+    def test_a_repeated_call_id_still_cancels_the_one_running(self):
+        waiting, answer = self.careful_in("s1", "dup")
+        self.assertEqual(text_of(self.core.call_tool("careful", {"quick": True}, call_id="dup")), "s1")
+        self.core.notify("tool.cancel", {"session": "s1", "call_id": "dup"})
+        waiting.join(5)
+        self.assertEqual(text_of(answer), "s1 cancelled")
+
+    def test_default_call_ids_differ_side_by_side(self):
+        start = threading.Barrier(16)
+
+        def call():
+            start.wait(5)
+            for _ in range(4):
+                self.core.call_tool("careful", {"quick": True})
+
+        threads = [threading.Thread(target=call) for _ in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        ids = [call.call_id for call in self.calls]
+        self.assertEqual(len(ids), 64)
+        self.assertEqual(len(set(ids)), 64, sorted(ids))
 
     def test_calling_the_core_from_a_tool(self):
         self.assertEqual(text_of(self.core.call_tool("asks")), "sha256:x unknown_method")
@@ -423,6 +488,19 @@ class Effects(unittest.TestCase):
         self.assertNotIn("checked", self.seen[-1].params, "no paths declared: no checked")
         self.assertEqual(self.seen[-1].checked, [])
         self.assertIsNone(self.seen[-1].channel, "doesn't run commands: no channel")
+
+    def test_checked_leaves_out_what_cant_be_told(self):
+        # As the core: `..` after a folder that isn't there yet can't be told (a link may appear there later), and `~`
+        # without a home neither.
+        self.call(args={"file_path": "new/deeper/b.txt", "files": ["./c.txt"]})
+        self.assertEqual(self.seen[-1].checked, [self.real(os.path.join("new", "deeper", "b.txt")), self.real("c.txt")],
+                         "a missing tail hangs off its nearest existing parent")
+        if os.name != "nt":  # Windows folds `..` away before asking the file system, the core there too
+            self.call(args={"file_path": "missing/../a.txt", "files": ["b.txt"]})
+            self.assertEqual(self.seen[-1].checked, [self.real("b.txt")], "`..` after a missing folder is left out")
+        self.core.home = None
+        self.call(args={"file_path": "~/n.txt", "files": ["d.txt"]})
+        self.assertEqual(self.seen[-1].checked, [self.real("d.txt")], "no home: `~` paths are left out")
 
     def test_checked_follows_links(self):
         os.mkdir(self.real("there"))

@@ -20,6 +20,7 @@ install it with pip. Apache-2.0 licensed. The protocol itself is in Miyu's `docs
 import hashlib
 import json
 import os
+import pathlib
 import queue
 import re
 import stat
@@ -248,7 +249,10 @@ class Extension:
         # in the same session with the earlier answer and does nothing, across connections; plain x1, x2... would make a
         # restarted extension's first session.send calls silently replay old ones.
         self._id_prefix = f"x{os.getpid():x}{time.time_ns():x}-"
+        # The tool calls in flight, for `tool.cancel`: `(session, call_id)` to the calls running under it. The core numbers
+        # calls per session, so two sessions can run the same call_id at once.
         self._calls = {}
+        self._calls_lock = threading.Lock()
 
     # Registering ---------------------------------------------------------------------------------------------------
 
@@ -473,10 +477,13 @@ class Extension:
         if "id" not in message:
             self._notified(method, params)
             return
+        call = None
         if method == "tool.call":
+            # Registered before the answering thread starts: `tool.cancel` may arrive before it runs.
             call = Call(params)
-            self._calls[call.call_id] = call
-        threading.Thread(target=self._answer, args=(message["id"], method, params), daemon=True).start()
+            with self._calls_lock:
+                self._calls.setdefault((call.session, call.call_id), []).append(call)
+        threading.Thread(target=self._answer, args=(message["id"], method, params, call), daemon=True).start()
 
     def _notified(self, method, params):
         if method == "extension.config":
@@ -489,8 +496,9 @@ class Extension:
             for function in self._config_handlers:
                 self._queue(function, changed)
         elif method == "tool.cancel":
-            call = self._calls.get(params.get("call_id"))
-            if call is not None:
+            with self._calls_lock:
+                calls = list(self._calls.get((params.get("session"), params.get("call_id")), ()))
+            for call in calls:
                 call._cancelled.set()
         elif method in self._handlers:
             self._queue(self._handlers[method], params)
@@ -510,9 +518,9 @@ class Extension:
             except Exception:  # a handler's bug: report it, keep handling
                 traceback.print_exc(file=sys.stderr)
 
-    def _answer(self, request_id, method, params):
+    def _answer(self, request_id, method, params, call=None):
         try:
-            result = self._handle(method, params)
+            result = self._handle(method, params, call)
         except _NotFound:
             self._send({"jsonrpc": "2.0", "id": request_id,
                         "error": {"code": _METHOD_NOT_FOUND, "message": f"no handler for {method}"}})
@@ -530,16 +538,26 @@ class Extension:
                             "error": {"code": _INTERNAL_ERROR, "message": f"{type(error).__name__}: {error}"}})
                 return
         finally:
-            if method == "tool.call":
-                self._calls.pop(params.get("call_id"), None)
+            if call is not None:
+                self._forget(call)
         self._send({"jsonrpc": "2.0", "id": request_id, "result": result})
 
-    def _handle(self, method, params):
+    def _forget(self, call):
+        """Take an answered call out of the calls in flight; another one under the same id stays."""
+        key = (call.session, call.call_id)
+        with self._calls_lock:
+            running = self._calls.get(key, [])
+            if call in running:
+                running.remove(call)
+            if not running:
+                self._calls.pop(key, None)
+
+    def _handle(self, method, params, call=None):
         if method == "tool.call":
             function = self._tool_handlers.get(params.get("tool"))
             if function is None:
                 raise _NotFound()
-            returned = function(params.get("args", {}), self._calls[params.get("call_id")])
+            returned = function(params.get("args", {}), call)
             if isinstance(returned, Reply):
                 return returned.to_json()
             if isinstance(returned, dict):
@@ -614,6 +632,7 @@ class FakeCore:
         self._lock = threading.Lock()
         self._waiting = {}
         self._next = 0
+        self._called = 0
         self._registered = threading.Event()
         # An extension with methods has registered once `package.methods` arrives too.
         self._expects_methods = bool(ext._methods)
@@ -634,7 +653,10 @@ class FakeCore:
         """Call `tool` the way the core does; returns the result dict (or the JSON-RPC error as `{"error": ...}`). The
         result comes back as the extension wrote it; the effects the core would keep land in `effects`, the rest in
         `dropped`."""
-        call_id = call_id or f"c{self._next + 1}"
+        if not call_id:
+            with self._lock:
+                self._called += 1
+                call_id = f"c{self._called}"
         args = args or {}
         params = {"session": session, "call_id": call_id, "tool": tool, "args": args, "cwd": self.cwd, "owner": owner}
         spec = next((one for one in self.tools if one.get("name") == tool), {})
@@ -710,13 +732,32 @@ class FakeCore:
     # The core's checks on paths and effects (its design 63, sections 3 and 4) ----------------------------------------
 
     def _real(self, path):
-        """Where `path` really is: relative to `cwd`, `~` to `home`, links followed; `None` when it can't be told."""
+        """Where `path` really is: relative to `cwd`, `~` to `home`, links followed; a missing tail is appended to its
+        nearest existing parent. `None` when it can't be told: `~` without a home, `..` after a missing folder."""
         rest = _tilde(path)
-        joined = os.path.join(self.home, rest) if rest is not None else os.path.join(self.cwd, path)
+        if rest is not None:
+            if self.home is None:
+                return None
+            joined = os.path.join(self.home, rest)
+        else:
+            joined = os.path.join(self.cwd, path)
         try:
-            return os.path.realpath(joined)
+            if os.path.exists(joined):
+                return os.path.realpath(joined)
+            parts = pathlib.PurePath(joined).parts
+            for keep in range(len(parts) - 1, 0, -1):
+                prefix = os.path.join(*parts[:keep])
+                if not os.path.exists(prefix):
+                    continue
+                real = os.path.realpath(prefix)
+                for part in parts[keep:]:
+                    if part == "..":
+                        return None
+                    real = os.path.join(real, part)
+                return real
         except (OSError, ValueError):
-            return None
+            pass
+        return None
 
     def _judge(self, declared, args):
         """`(real, write)` for each declared path in `args`, in order; a missing or non-string argument gives none."""

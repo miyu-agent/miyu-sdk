@@ -1,7 +1,7 @@
 //! miyu-ext 经假核心走协议，照 Miyu 的协议参考（`docs/reference/extensions.md`），和 Python 那份的测试一一对应。
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
@@ -247,6 +247,144 @@ fn cancel_reaches_a_running_call_and_others_are_not_held_up() {
     );
     core.notify("tool.cancel", json!({"session": "s1", "call_id": "c-p"}));
     assert_eq!(text(&waiting.join().unwrap()), "stopped");
+}
+
+/// The `careful` tool's bench: every call's id, whether a waiting one has started, and whether one saw its cancel.
+struct Careful {
+    core: Arc<FakeCore>,
+    ids: Arc<Mutex<Vec<String>>>,
+    entered: Arc<AtomicBool>,
+    noticed: Arc<AtomicBool>,
+}
+
+/// A `careful` tool: quick (answers its session) when `args.quick`, else waits up to two seconds to be cancelled.
+fn careful() -> Careful {
+    let (ids, entered, noticed) = (
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (calls, started, saw) = (Arc::clone(&ids), Arc::clone(&entered), Arc::clone(&noticed));
+    let mut ext = Extension::new("t", "0.0.0");
+    ext.tool(
+        Tool::new("careful", "Quick, or waits."),
+        move |args, call| {
+            calls
+                .lock()
+                .expect("the ids")
+                .push(call.call_id().to_string());
+            if args["quick"] == json!(true) {
+                return Reply::text(call.session());
+            }
+            started.store(true, Ordering::Relaxed);
+            for _ in 0..200 {
+                if call.cancelled() {
+                    saw.store(true, Ordering::Relaxed);
+                    return Reply::text(format!("{} cancelled", call.session()));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Reply::text(format!("{} not cancelled", call.session()))
+        },
+    )
+    .tool(Tool::new("quick", "Quick."), |_, _| Reply::text("quick"));
+    Careful {
+        core: Arc::new(FakeCore::start(ext, Map::new())),
+        ids,
+        entered,
+        noticed,
+    }
+}
+
+/// Start a waiting `careful` call in `session` on a thread, back once it runs.
+fn careful_in(bench: &Careful, session: &str, call_id: &str) -> std::thread::JoinHandle<Value> {
+    bench.entered.store(false, Ordering::Relaxed);
+    let (core, params) = (
+        Arc::clone(&bench.core),
+        json!({"session": session, "call_id": call_id, "tool": "careful", "args": {}, "cwd": "/", "owner": true}),
+    );
+    let waiting = std::thread::spawn(move || core.request("tool.call", params));
+    while !bench.entered.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    waiting
+}
+
+fn quick_in(core: &FakeCore, session: &str, call_id: &str) -> Value {
+    core.request(
+        "tool.call",
+        json!({"session": session, "call_id": call_id, "tool": "careful", "args": {"quick": true}, "cwd": "/",
+               "owner": true}),
+    )
+}
+
+#[test]
+fn the_same_call_id_in_two_sessions_is_two_calls() {
+    // The core numbers calls per session (call_<seq>_<n>), so two sessions can have call_5_1 in flight at once.
+    let bench = careful();
+    let core = &bench.core;
+    let waiting = careful_in(&bench, "s1", "call_5_1");
+    assert_eq!(text(&quick_in(core, "s2", "call_5_1")), "s2");
+    core.notify(
+        "tool.cancel",
+        json!({"session": "s2", "call_id": "call_5_1"}),
+    );
+    assert_eq!(
+        text(&core.call_tool("quick", json!({}))),
+        "quick",
+        "the cancel above is handled by now"
+    );
+    // The waiting call looks every 10 ms: a cancel that reached it would show by now.
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !bench.noticed.load(Ordering::Relaxed),
+        "cancelling s2's call_5_1 leaves s1's alone"
+    );
+    core.notify(
+        "tool.cancel",
+        json!({"session": "s1", "call_id": "call_5_1"}),
+    );
+    assert_eq!(
+        text(&waiting.join().unwrap()),
+        "s1 cancelled",
+        "s2's call ending didn't drop s1's from the calls in flight"
+    );
+}
+
+#[test]
+fn a_repeated_call_id_still_cancels_the_one_running() {
+    let bench = careful();
+    let waiting = careful_in(&bench, "s1", "dup");
+    assert_eq!(text(&quick_in(&bench.core, "s1", "dup")), "s1");
+    bench
+        .core
+        .notify("tool.cancel", json!({"session": "s1", "call_id": "dup"}));
+    assert_eq!(text(&waiting.join().unwrap()), "s1 cancelled");
+}
+
+#[test]
+fn default_call_ids_differ_side_by_side() {
+    let bench = careful();
+    let start = Arc::new(Barrier::new(16));
+    let threads: Vec<_> = (0..16)
+        .map(|_| {
+            let (core, start) = (Arc::clone(&bench.core), Arc::clone(&start));
+            std::thread::spawn(move || {
+                start.wait();
+                for _ in 0..4 {
+                    core.call_tool("careful", json!({"quick": true}));
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let mut ids = bench.ids.lock().unwrap().clone();
+    assert_eq!(ids.len(), 64);
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 64, "{ids:?}");
 }
 
 #[test]

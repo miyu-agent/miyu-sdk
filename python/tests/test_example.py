@@ -1,6 +1,7 @@
 """例子包 `examples/hello`、`examples/replace` 照假核心跑一遍：作者照它抄，它就得是对的。"""
 
 import os
+import re
 import runpy
 import sys
 import tempfile
@@ -48,6 +49,13 @@ class Example(unittest.TestCase):
             missing = core.call_tool("replace_text", {"file_path": "a.txt", "old": "nowhere", "new": "x"})
             self.assertEqual(missing["error"], True)
             core.close()
+
+    def test_the_manifests_can_be_packed(self):
+        # `miyu pkg pack` and the package index need `[package] version`; installing doesn't, so only packing catches it.
+        for example in ("hello", "replace"):
+            with open(os.path.join(HERE, "..", "examples", example, "package.toml"), encoding="utf-8") as file:
+                package = file.read().split("\n[", 1)[0]
+            self.assertRegex(package, re.compile(r'^version = "\d+\.\d+\.\d+"$', re.M), example)
 
 
 if __name__ == "__main__":

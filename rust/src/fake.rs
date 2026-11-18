@@ -47,6 +47,8 @@ pub struct FakeCore {
     writer: Arc<Mutex<Option<PipeWriter>>>,
     extension: Option<JoinHandle<Result<(), String>>>,
     next: AtomicU64,
+    /// The default call ids handed out so far.
+    called: AtomicU64,
     place: Mutex<Place>,
     channel: Mutex<Option<Value>>,
     voice_max_ms: Mutex<Option<u64>>,
@@ -122,6 +124,7 @@ impl FakeCore {
             writer,
             extension: Some(extension),
             next: AtomicU64::new(0),
+            called: AtomicU64::new(0),
             place: Mutex::new(Place {
                 cwd: PathBuf::from("/"),
                 home,
@@ -225,7 +228,7 @@ impl FakeCore {
     /// Call `tool` the way the core does; the result as the extension wrote it, or `{"error": …}`. The effects the core
     /// would keep land in [`FakeCore::effects`], the rest in [`FakeCore::dropped`].
     pub fn call_tool(&self, tool: &str, args: Value) -> Value {
-        let call_id = format!("c{}", self.next.load(Ordering::Relaxed) + 1);
+        let call_id = format!("c{}", self.called.fetch_add(1, Ordering::Relaxed) + 1);
         self.call_tool_as(tool, args, &call_id)
     }
 
