@@ -398,6 +398,44 @@ fn checked_follows_the_declared_paths() {
     );
 }
 
+#[test]
+fn checked_leaves_out_what_cant_be_told() {
+    // As the core: `..` after a folder that isn't there yet can't be told (a link may appear there later). Python's
+    // test also clears the home; here the home can only be set, so that half is Python's alone.
+    let bench = Bench::new();
+    bench.call(
+        "my_edit",
+        json!({"file_path": "new/deeper/b.txt", "files": ["./c.txt"]}),
+        Next::default(),
+    );
+    assert_eq!(
+        bench.last_checked(),
+        [
+            bench
+                .folder
+                .join("new")
+                .join("deeper")
+                .join("b.txt")
+                .to_string_lossy(),
+            bench.folder.join("c.txt").to_string_lossy(),
+        ],
+        "a missing tail hangs off its nearest existing parent"
+    );
+    // Windows folds `..` away before asking the file system, the core there too.
+    if cfg!(unix) {
+        bench.call(
+            "my_edit",
+            json!({"file_path": "missing/../a.txt", "files": ["b.txt"]}),
+            Next::default(),
+        );
+        assert_eq!(
+            bench.last_checked(),
+            [bench.folder.join("b.txt").to_string_lossy()],
+            "`..` after a missing folder is left out"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn checked_follows_links() {

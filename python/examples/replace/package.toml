@@ -1,4 +1,5 @@
 [package]
+version = "0.1.0"
 protocol = [1, 1]
 name = { en = "Replace", zh = "替换" }
 summary = { en = "Replaces text in files: an example of a tool that edits files, written with miyu_ext", zh = "替换文件里的字：改文件的工具的例子，用 miyu_ext 写的" }

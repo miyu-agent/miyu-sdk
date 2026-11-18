@@ -276,10 +276,20 @@ pub(crate) fn fatal(message: &str) -> ! {
     std::process::exit(EXIT_CONFIG)
 }
 
+/// A call in flight: its session and call id. The core numbers calls per session, so two sessions can run the same
+/// call id at once.
+type CallKey = (String, String);
+
+/// The key of a `tool.call` or `tool.cancel`.
+fn call_key(params: &Value) -> CallKey {
+    let field = |name: &str| params[name].as_str().unwrap_or_default().to_string();
+    (field("session"), field("call_id"))
+}
+
 /// The running side: handlers, the calls in flight (for `tool.cancel`) and the core.
 struct Server {
     handlers: Handlers,
-    calls: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    calls: Mutex<HashMap<CallKey, Vec<Arc<AtomicBool>>>>,
     core: Core,
     /// Config pushes and other notifications go to one thread, in order: a handler may call the core and wait, which
     /// it couldn't on the reading thread (the answer would never be read).
@@ -331,13 +341,15 @@ impl Server {
         // Register the cancel flag before spawning: `tool.cancel` may arrive before the answering thread starts.
         let cancelled = (method == "tool.call").then(|| {
             let flag = Arc::new(AtomicBool::new(false));
-            let call_id = params["call_id"].as_str().unwrap_or_default().to_string();
             self.calls
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(call_id, Arc::clone(&flag));
+                .entry(call_key(&params))
+                .or_default()
+                .push(Arc::clone(&flag));
             flag
         });
+        let mine = cancelled.clone();
         let server = Arc::clone(self);
         std::thread::spawn(move || {
             let answer = catch_unwind(AssertUnwindSafe(|| {
@@ -347,13 +359,16 @@ impl Server {
                 "tool.call" => Ok(Reply::failed("the tool panicked").into_json()),
                 _ => Err(json!({"code": -32603, "message": format!("{method} panicked")})),
             });
-            if method == "tool.call" {
-                let call_id = params["call_id"].as_str().unwrap_or_default();
-                server
-                    .calls
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(call_id);
+            if let Some(mine) = mine {
+                // Only this call leaves: another one under the same key stays cancellable.
+                let key = call_key(&params);
+                let mut calls = server.calls.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(running) = calls.get_mut(&key) {
+                    running.retain(|one| !Arc::ptr_eq(one, &mine));
+                    if running.is_empty() {
+                        calls.remove(&key);
+                    }
+                }
             }
             server.core.shared.wire.answer(&id, answer);
         });
@@ -411,7 +426,7 @@ impl Server {
             }
             "tool.cancel" => {
                 let calls = self.calls.lock().unwrap_or_else(PoisonError::into_inner);
-                if let Some(cancelled) = calls.get(params["call_id"].as_str().unwrap_or_default()) {
+                for cancelled in calls.get(&call_key(params)).into_iter().flatten() {
                     cancelled.store(true, Ordering::Relaxed);
                 }
             }
