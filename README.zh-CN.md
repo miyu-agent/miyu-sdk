@@ -122,7 +122,7 @@ ext.run();
 
 ## 修改文件、运行命令的工具
 
-核心从提交 `2490fb77`、`514bdc40` 开始支持这两类工具。协议见核心仓库的 `docs/zh/reference/extensions.md`（`provide`、`tool.call` 下的「效果」「跑命令」），写法见 `docs/zh/dev/extensions.md` 的「改文件的工具」「跑命令的工具」。
+协议见核心仓库的 `docs/zh/reference/extensions.md`（`provide`、`tool.call` 下的「效果」「跑命令」），写法见 `docs/zh/dev/extensions.md` 的「改文件的工具」「跑命令的工具」。
 
 **修改文件的工具**（编辑器、格式化、改名这类工具）：如果你想让工具和内置的 `edit` 一样显示差异和增删的行数，并且在 AI 读过的文件被你修改以后不需要重新读取，需要做到下面三点。
 
