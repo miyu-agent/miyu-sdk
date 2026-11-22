@@ -122,7 +122,7 @@ The names in the two SDKs map to each other as follows (the next section uses th
 
 ## Tools that edit files or run commands
 
-The core supports these two kinds of tools starting from commits `2490fb77` and `514bdc40`. The protocol is described in the core repository's `docs/en/reference/extensions.md` (`provide`, and the effects and command sections under `tool.call`), and how to write such tools is described in the sections on tools that change files and tools that run commands in `docs/en/dev/extensions.md`.
+The protocol is described in the core repository's `docs/en/reference/extensions.md` (`provide`, and the effects and command sections under `tool.call`), and how to write such tools is described in the sections on tools that change files and tools that run commands in `docs/en/dev/extensions.md`.
 
 **Tools that edit files** (editors, formatters, renaming tools and the like): if you want your tool to show diffs and added and removed line counts like the built-in `edit`, and you want the AI not to have to read a file again after you change a file it has read, you need to do the following three things.
 
